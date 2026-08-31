@@ -1,8 +1,8 @@
-%FEMSOLID_EX_QUAD4_09_AI_NL_CONSISTENCY Verifikation des Residual-Energie-Elements.
+%FEMSOLID_EX_QUAD4_09_AI_NL_CONSISTENCY Verifikation des Voll-Energie-Elements.
 % ------------------------------------------------------------------------
 % DESCRIPTION
-%   Prueft das nichtlineare KI-Element (element_quad4_nl_ai, Residual-Energie
-%   mit K0-Split) OHNE Solver -- Gates d und e der Verifikationsleiter:
+%   Prueft das nichtlineare KI-Element (element_quad4_nl_ai, Voll-Energie-
+%   Netz ohne K0-Split) OHNE Solver -- Gates d und e der Verifikationsleiter:
 %
 %   Gate d  Netzauswertung in MATLAB gegen die im .mat mitgelieferten
 %           Oracle-Testvektoren aus Python (test_C/test_Z -> test_W/F/K).
@@ -16,8 +16,8 @@
 %             e3  Finte = 0 bei reiner Starrkoerperbewegung (Translation +
 %                 grosse Rotation) -- muss Maschinengenauigkeit sein
 %             e4  Ke bei u -> 0 gegen das LINEARE Element (element_quad4_lin)
-%                 -- prueft, ob K_NL(c,0) ~ 0 tatsaechlich erreicht wird
-%                 (weiche Nebenbedingung, siehe Plan Phase 2)
+%                 -- prueft die GELERNTE Tangente im unbelasteten Zustand
+%                 (ohne K0-Split traegt das Netz auch die lineare Steifigkeit)
 %
 %   e1/e2 pruefen die KONSISTENZ (Ke = dFinte/dUe), die beim Energie-Ansatz
 %   strukturell gelten MUSS -- unabhaengig davon, wie gut das Netz trainiert
@@ -74,8 +74,8 @@ fprintf('\n');
 % Gate d: MATLAB-Netzauswertung vs. Python-Oracle-Vektoren
 % ========================================================================
 % Der Export erfolgt in fp64 (test_precision), damit hier wirklich die
-% MATLAB-Rekurrenzen gegen PyTorch geprueft werden und nicht der
-% fp32-Rundungsfehler von K0*z (Ausloeschung durch den Nullraum von K0).
+% MATLAB-Rekurrenzen gegen PyTorch geprueft werden und nicht das
+% fp32-Rundungsrauschen der Gewichte.
 GATE_D_TOL = 1e-10;
 if ~isfield(NET, 'test_precision') || ~strcmpi(strtrim(char(NET.test_precision)), 'float64')
     GATE_D_TOL = 1e-5;      % aelterer fp32-Export
@@ -179,7 +179,7 @@ fprintf('  e4  Ke(u->0) vs linear    : max %.3f %% | Mittel %.3f %% (max < 1 %%)
     100*max(e4), 100*mean(e4), verdict(max(e4) < 0.01));
 
 fprintf('\n  Hinweis: e1/e2 pruefen die KONSISTENZ (strukturell garantiert),\n');
-fprintf('           e4 die weiche Nebenbedingung K_NL(c,0) ~ 0 (gelernt).\n');
+fprintf('           e4 die GELERNTE Tangente bei u -> 0 (kein K0-Split mehr).\n');
 
 allOK = max([eW; eF; eK]) <= GATE_D_TOL && max(e1) <= 1e-6 && max(e2) <= 1e-6 ...
         && max(e3) <= 1e-12 && max(e4) < 0.01;

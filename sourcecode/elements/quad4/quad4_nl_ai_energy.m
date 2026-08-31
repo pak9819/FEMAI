@@ -40,7 +40,7 @@ function [Wphys, Finte, Ke, dg, meta] = quad4_nl_ai_energy(coord_e, mat_e, Ue)
 %
 % ------------------------------------------------------------------------
 % LAST MODIFIED
-%   2026-08-18
+%   2026-08-31
 %
 % COPYRIGHT AND LICENSE
 %   Copyright (c) 2026 Daniel Materna
@@ -111,7 +111,7 @@ y = xhat + v;
 z = P * (Bm * y - xhat);
 
 % ------------------------------------------------------------------------
-% 4. Kanonisches Energiemodell (K0-Split + Residual-Netz)
+% 4. Kanonisches Energiemodell (Voll-Energie-Netz, keine numerische Energie)
 % ------------------------------------------------------------------------
 if nargout > 4
     [What, p, H, meta] = quad4_nl_ai_model(xhat, z);

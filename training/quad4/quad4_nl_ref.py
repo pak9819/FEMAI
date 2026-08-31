@@ -1,4 +1,4 @@
-"""Referenzmathematik fuer das nichtlineare DLFE-quad4-Element (Residual-Energie).
+"""Referenzmathematik fuer das nichtlineare DLFE-quad4-Element (Voll-Energie).
 
 Dieses Modul ist die EINZIGE Quelle der Wahrheit fuer:
 
@@ -24,11 +24,15 @@ Gate b: die komplette Kette mit ANALYTISCHEM W gegen zentrale Differenzen des
 Beide Gates laufen ohne Netz -- sie trennen Ketten-/Referenzfehler von
 Netzfehlern, BEVOR ein Netz existiert.
 
-Modell (Residual-Energie mit K0-Split):
+Modell (Voll-Energie-Netz, kein K0-Split):
 
-    W(c,z)  = 0.5*z' K0(c) z + W_NL(c,z)
-    F(c,z)  = K0(c) z + grad_z W_NL
-    K(c,z)  = K0(c)   + hess_z W_NL
+    W(c,z)  = W_net(c,z)          quadratischer + nichtlinearer Anteil
+    F(c,z)  = grad_z W_net
+    K(c,z)  = hess_z W_net
+
+k0_ref bleibt als REFERENZ erhalten (Gate a prueft k0_ref = K(z=0), Gate e4
+in MATLAB prueft die gelernte Tangente bei u -> 0 gegen das lineare Element);
+im Element selbst wird K0 nicht mehr berechnet.
 
 Konventionen (identisch MATLAB):
     coords : (4,2)  Knotenkoordinaten, Zeile i = [xi, yi]

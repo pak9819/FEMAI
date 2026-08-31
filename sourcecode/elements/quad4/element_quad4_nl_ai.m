@@ -1,5 +1,5 @@
 function [Ke, Fbe, Fte, Finte, history] = element_quad4_nl_ai(coord_e, mat_e, b_e, DeltaT_e, Ue, history, gp, w, MATNAME, MATCOND, opts)
-%ELEMENT_QUAD4_NL_AI Nichtlineares quad4-Element: Residual-Energie-Netz.
+%ELEMENT_QUAD4_NL_AI Nichtlineares quad4-Element: Voll-Energie-Netz.
 % ------------------------------------------------------------------------
 % DESCRIPTION
 %   "Deep Learned Finite Elements" fuer das bilineare Viereckselement in der
@@ -8,25 +8,24 @@ function [Ke, Fbe, Fte, Finte, history] = element_quad4_nl_ai(coord_e, mat_e, b_
 %   Das Element ersetzt die Gauss-Schleife des klassischen Elements durch ein
 %   SKALARES Energiemodell auf der kanonischen Geometrie:
 %
-%     What(chat, z) = 0.5*z' K0hat(chat) z  +  Wnl(chat, z)
+%     What(chat, z) = Wnet(chat, z)
 %
-%   K0hat ist die EXAKTE lineare Steifigkeit der kanonischen Geometrie
-%   (analytisch pro Aufruf, kleine 4-GP-Schleife mit linearer B-Matrix --
-%   bewusst OHNE Cache, damit assemble.m zustandslos bleibt). Wnl ist ein
-%   kleines neuronales Residual-Netz. Beide Ausgabegroessen entstehen durch
-%   DIFFERENTIATION desselben Potentials:
+%   Das Netz traegt die VOLLE Energie (quadratischer + nichtlinearer Anteil);
+%   im Element gibt es KEINE numerische Energie-/Steifigkeitsberechnung mehr.
+%   Beide Ausgabegroessen entstehen durch DIFFERENTIATION desselben
+%   Potentials:
 %
 %     Finte = dW/dUe        Ke = d2W/dUe2 = dFinte/dUe
 %
 %   -> Ke ist PER KONSTRUKTION exakt die Jacobimatrix von Finte. Genau diese
-%   Konsistenz fehlte der Vorgaengerversion (zwei unabhaengige Netzkoepfe fuer
-%   Ke und Finte, gemessene Inkonsistenz ~7 %), die deshalb nur linear mit
-%   Kontraktionsrate ~0.9 konvergierte und das Iterationslimit erreichte.
+%   Konsistenz fehlte der Zwei-Kopf-Variante (zwei unabhaengige Netzkoepfe
+%   fuer Ke und Finte, gemessene Inkonsistenz ~7 %), die deshalb nur linear
+%   mit Kontraktionsrate ~0.9 konvergierte und das Iterationslimit erreichte.
 %
-%   Warum der K0-Split: fuer StVenant ist What exakt ein Polynom 4. Grades in
-%   z. Der Split entfernt den quadratischen Term -- das Netz lernt nur den
-%   kubisch/quartischen Rest (leichtere Zielfunktion, kleineres Netz) und das
-%   Kleinamplituden-Regime (Newton-Endphase) wird von K0hat EXAKT dominiert.
+%   Die Tangente bei z = 0 (lineare Steifigkeit) ist GELERNT, nicht
+%   analytisch -- ihre Genauigkeit wird in Gate e4
+%   (FEMSolid_ex_quad4_09_ai_nl_consistency.m) gegen das lineare Element
+%   geprueft.
 %
 %   Exakte Struktur (nicht gelernt):
 %     - Konsistenz Ke = dFinte/dUe            (Potentialform)
@@ -34,7 +33,7 @@ function [Ke, Fbe, Fte, Finte, history] = element_quad4_nl_ai(coord_e, mat_e, b_
 %     - Kraeftegleichgewicht sum_i Finte_i = 0 und Translationsnullraum von
 %       Ke                                    (Translationsprojektor P)
 %     - Finte = 0 bei reiner Starrkoerperbewegung, in Maschinengenauigkeit
-%       (Ko-Rotation liefert z = 0, Subtraktionsform liefert Fnl(c,0) = 0)
+%       (Ko-Rotation liefert z = 0, Subtraktionsform liefert F(c,0) = 0)
 %     - Groessen-, Translations- und Rotationsinvarianz sowie Objektivitaet
 %       (Kanonisierung + Ko-Rotation, Ableitungen exakt mitgefuehrt)
 %
@@ -57,7 +56,7 @@ function [Ke, Fbe, Fte, Finte, history] = element_quad4_nl_ai(coord_e, mat_e, b_
 %
 % ------------------------------------------------------------------------
 % LAST MODIFIED
-%   2026-08-18
+%   2026-08-31
 %
 % COPYRIGHT AND LICENSE
 %   Copyright (c) 2026 Daniel Materna
@@ -114,7 +113,7 @@ if ~cfg_checked
     cfg_checked = true;
 else
     % ------------------------------------------------------------------
-    % Kern: Energie -> Finte, Ke (Kanonisierung, Ko-Rotation, K0-Split, Netz)
+    % Kern: Energie -> Finte, Ke (Kanonisierung, Ko-Rotation, Netz)
     % ------------------------------------------------------------------
     [~, Finte, Ke, dg] = quad4_nl_ai_energy(coord_e, mat_e, Ue);
 end

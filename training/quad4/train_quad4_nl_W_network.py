@@ -1,32 +1,32 @@
-"""Residual-Energie-Netz fuer das nichtlineare quad4-Element (Sobolev-Training).
+"""Voll-Energie-Netz fuer das nichtlineare quad4-Element (Sobolev-Training).
 
-Modell (K0-Split, kein Cache):
+Modell (KEIN K0-Split -- das Netz traegt die gesamte Energie):
 
-    W(c,z) = 0.5*z' K0(c) z + W_NL(c,z)          K0 = exakte lineare Steifigkeit
-    F      = K0 z + grad_z W_NL
-    K      = K0   + hess_z W_NL
+    W(c,z) = W_net(c,z)          quadratischer + nichtlinearer Anteil
+    F      = grad_z W_net
+    K      = hess_z W_net
 
-Das Netz lernt NUR die nichtlineare Energieabweichung W_NL. Fuer StVenant ist
-W exakt ein Polynom 4. Grades in z; der K0-Split entfernt den quadratischen
-Term, das Netz sieht also nur den kubisch/quartischen Rest. Folgen:
+Das Netz lernt die VOLLE Formaenderungsenergie (fuer StVenant exakt ein
+Polynom 4. Grades in z, inklusive des quadratischen Terms). Im Element gibt
+es damit KEINE numerische Energie-/Steifigkeitsberechnung mehr -- nur noch
+Netz-Forward plus exakte Ableitungen. Folgen:
 
   * Konsistenz Ke = dFinte/dz gilt PER KONSTRUKTION (beides aus einem
-    Skalarpotential) -> Newton konvergiert wieder quadratisch.
-  * Das Kleinamplituden-Regime (Newton-Endphase, historischer Schmerzpunkt)
-    wird von K0 exakt dominiert.
-  * Leichtere Zielfunktion -> kleineres Netz -> schnelleres Element.
+    Skalarpotential) -> Newton konvergiert quadratisch.
+  * Die Tangente bei z = 0 (lineare Steifigkeit) ist jetzt GELERNT, nicht
+    analytisch -- ihre Genauigkeit haengt am K-Term des Sobolev-Losses und
+    wird in Gate e4 (MATLAB) gegen das lineare Element geprueft.
+  * Schwerere Zielfunktion als beim K0-Split -> tendenziell groesseres Netz.
 
 Strukturelle Nullform (Subtraktionsform, nur W und F):
 
-    W_NL = f(c~,z~) - f(c~,0) - grad_z~ f(c~,0)' z~
+    W_net = f(c~,z~) - f(c~,0) - grad_z~ f(c~,0)' z~
 
-liefert exakt W_NL(c,0) = 0 und F_NL(c,0) = 0 (reine Starrkoerperbewegung ->
-Finte = 0 in Maschinengenauigkeit). K_NL(c,0) ~ 0 wird weich ueber die
-Targets erzwungen (Residual-K-Target bei z=0 ist exakt 0) und in Gate e4
-(MATLAB) hart geprueft.
+liefert exakt W_net(c,0) = 0 und F(c,0) = 0 (reine Starrkoerperbewegung ->
+Finte = 0 in Maschinengenauigkeit).
 
-Trainiert wird auf RESIDUEN, normiert und bewertet wird auf TOTALGROESSEN --
-denn das ist, was der Newton-Loeser sieht.
+Trainiert, normiert und bewertet wird auf TOTALGROESSEN -- das ist, was der
+Newton-Loeser sieht.
 
 Aufruf:
     python train_quad4_nl_W_network.py
@@ -115,10 +115,10 @@ LAMBDA_F = 1.0
 LAMBDA_K = 1.0
 
 # Einzeltraining (ohne QUAD4_SWEEP): per Env ueberschreibbar.
-# Default h48/d3 -- im Sweep-Quick-Pass bereits eK 1.24 % / eF 0.82 % bei nur
-# 5 424 MACs. Da der K0-Split die Zielfunktion stark vereinfacht, zahlen sich
-# groessere Netze kaum aus, kosten aber direkt Assemblierungszeit.
-HIDDEN_DEFAULT = int(os.environ.get("QUAD4_HIDDEN", 48))
+# Default h64/d3: ohne K0-Split muss das Netz auch den quadratischen Term
+# (implizit die lineare Steifigkeit als Funktion der Geometrie) tragen --
+# das braucht mehr Kapazitaet als das h48-Residualnetz.
+HIDDEN_DEFAULT = int(os.environ.get("QUAD4_HIDDEN", 64))
 DEPTH_DEFAULT = int(os.environ.get("QUAD4_DEPTH", 3))
 SWEEP_HIDDEN = [48, 64, 96, 128]
 SWEEP_DEPTH = [3, 4]
@@ -336,7 +336,7 @@ def save_dataset_cache(key, tr_arr, va_arr, n_syn_val):
 # ---------------------------------------------------------------------------
 
 class WNet(nn.Module):
-    """Residual-Energie W_NL(c, z). Ableitungen werden extern gebildet."""
+    """Volle Energie W_net(c, z). Ableitungen werden extern gebildet."""
 
     def __init__(self, hidden, depth, c_mean, c_std, z_scale):
         super().__init__()
@@ -366,7 +366,8 @@ def net_terms(model, c, z, need_hess=True):
     """f, grad und Hessian des ROHEN MLP bzgl. zt -- plus Subtraktionsform.
 
     Rueckgabe (alles auf ROHE z bezogen, d.h. Normalisierung ausgerechnet):
-        W_NL (B,), F_NL (B,8), K_NL (B,8,8) oder None
+        W_net (B,), F_net (B,8), K_net (B,8,8) oder None
+    Das sind direkt die TOTALGROESSEN (volle Energie, kein K0-Split).
     Identische Zerlegung rechnet das MATLAB-Element.
 
     need_hess=False ueberspringt den Hessian -- er ist der mit Abstand teuerste
@@ -387,18 +388,18 @@ def net_terms(model, c, z, need_hess=True):
     g_val = vmap(g_fn)(zt, ct)
     g_0 = vmap(g_fn)(zero, ct)
 
-    W_NL = f_val - f_0 - (g_0 * zt).sum(dim=-1)
-    F_NL = (g_val - g_0) / zs
+    W_net = f_val - f_0 - (g_0 * zt).sum(dim=-1)
+    F_net = (g_val - g_0) / zs
     if not need_hess:
-        return W_NL, F_NL, None
+        return W_net, F_net, None
 
     H_val = vmap(jacfwd(g_fn))(zt, ct)
-    K_NL = H_val / (zs.unsqueeze(-1) * zs.unsqueeze(-2))
-    return W_NL, F_NL, K_NL
+    K_net = H_val / (zs.unsqueeze(-1) * zs.unsqueeze(-2))
+    return W_net, F_net, K_net
 
 
 # ---------------------------------------------------------------------------
-# Loss und Metriken (Residuen lernen, Totalgroessen normieren)
+# Loss und Metriken (Totalgroessen lernen und normieren)
 # ---------------------------------------------------------------------------
 
 _ti = torch.tensor(TRIU_IDX[:, 0], dtype=torch.long)
@@ -425,18 +426,12 @@ class Batch:
         self.W_tot = torch.tensor(arr["W"], device=dev)
         self.F_tot = torch.tensor(arr["F"], device=dev)
         self.K_tot = triu_to_full_t(torch.tensor(arr["Ktriu"], device=dev))
-        self.K0 = triu_to_full_t(torch.tensor(arr["K0triu"], device=dev))
         self.amp = torch.tensor(arr["amp"], device=dev)
         self.dist = torch.tensor(arr["dist"], device=dev)
+        # arr["K0triu"] bleibt im Datensatz-Cache erhalten (Formatkompatibilitaet),
+        # wird aber nicht mehr gebraucht: das Netz lernt die Totalgroessen direkt.
 
-        # Residual-Targets
-        self.F_lin = torch.einsum("bij,bj->bi", self.K0, self.z)
-        self.W_lin = 0.5 * (self.z * self.F_lin).sum(dim=-1)
-        self.W_NL_t = self.W_tot - self.W_lin
-        self.F_NL_t = self.F_tot - self.F_lin
-        self.K_NL_t = self.K_tot - self.K0
-
-        # Normen der TOTALGROESSEN (das, was Newton sieht)
+        # Normen der TOTALGROESSEN (zugleich Targets -- das, was Newton sieht)
         self.nW = self.W_tot.abs()
         self.nF = self.F_tot.norm(dim=-1)
         self.nK = self.K_tot.norm(dim=(-2, -1))
@@ -454,13 +449,13 @@ def make_floors(b: Batch):
 def sobolev_loss(model, b: Batch, idx, kidx, floorW, floorF):
     c = b.c[idx]
     z = b.z[idx]
-    W_NL, F_NL, _ = net_terms(model, c, z, need_hess=False)
-    lW = (((W_NL - b.W_NL_t[idx]) ** 2) / (b.W_tot[idx] ** 2 + floorW ** 2)).mean()
-    lF = (((F_NL - b.F_NL_t[idx]) ** 2).sum(-1)
+    W_net, F_net, _ = net_terms(model, c, z, need_hess=False)
+    lW = (((W_net - b.W_tot[idx]) ** 2) / (b.W_tot[idx] ** 2 + floorW ** 2)).mean()
+    lF = (((F_net - b.F_tot[idx]) ** 2).sum(-1)
           / (b.nF[idx] ** 2 + floorF ** 2)).mean()
     # K-Term auf kleinerem Subsample (Speicher/Zeit)
-    _, _, K_NL = net_terms(model, b.c[kidx], b.z[kidx])
-    lK = (((K_NL - b.K_NL_t[kidx]) ** 2).sum((-2, -1))
+    _, _, K_net = net_terms(model, b.c[kidx], b.z[kidx])
+    lK = (((K_net - b.K_tot[kidx]) ** 2).sum((-2, -1))
           / (b.nK[kidx] ** 2)).mean()
     return LAMBDA_W * lW + LAMBDA_F * lF + LAMBDA_K * lK, lW, lF, lK
 
@@ -472,9 +467,7 @@ def evaluate(model, b: Batch, chunk=8192):
     floorF = 0.02 * torch.sqrt((b.nF ** 2).mean())
     for s in range(0, len(b), chunk):
         sl = slice(s, min(s + chunk, len(b)))
-        _, F_NL, K_NL = net_terms(model, b.c[sl], b.z[sl])
-        F_pred = b.F_lin[sl] + F_NL
-        K_pred = b.K0[sl] + K_NL
+        _, F_pred, K_pred = net_terms(model, b.c[sl], b.z[sl])
         eF = (F_pred - b.F_tot[sl]).norm(dim=-1) / torch.clamp(b.nF[sl], min=floorF)
         eK = (K_pred - b.K_tot[sl]).norm(dim=(-2, -1)) / b.nK[sl]
         eF_all.append(eF.detach())
@@ -605,7 +598,7 @@ def gate_c(model, b: Batch, n=5, verbose=True):
     model.float()
     ok = worst_fd <= 1e-6 and worst_sym <= 1e-10
     if verbose:
-        log(f"\nGate c -- K_NL vs FD(F_NL): {worst_fd:.3e} (<= 1e-6), "
+        log(f"\nGate c -- K vs FD(F): {worst_fd:.3e} (<= 1e-6), "
             f"Symmetrie {worst_sym:.3e}  -> {'GRUEN' if ok else 'ROT'}")
     return ok, worst_fd, worst_sym
 
@@ -626,7 +619,7 @@ def git_hash():
 def build_mat(model, hidden, depth, va: Batch, res_json):
     model.eval()
     md = {
-        "model_form": "resid_energy_K0split_subtract_f0_gradf0",
+        "model_form": "total_energy_subtract_f0_gradf0",
         "activation": "GELU_erf",
         "input_order": "canonical_[c_hat(8)_then_z(8)]",
         "canonicalization": "edge_n1n2_to_pos_x_after_centroid_Lc",
@@ -636,7 +629,7 @@ def build_mat(model, hidden, depth, va: Batch, res_json):
         "material": ref.MATERIAL,
         "nu_train": ref.NU_TRAIN,
         "condition": ref.CONDITION,
-        "k0_source": "analytic_linear_gauss_loop_per_call_no_cache",
+        "k0_source": "none_full_energy_in_net",
         "env_ratio_max": ref.ENV_RATIO_MAX,
         "env_angle_min": ref.ENV_ANGLE_MIN,
         "env_angle_max": ref.ENV_ANGLE_MAX,
@@ -669,28 +662,16 @@ def build_mat(model, hidden, depth, va: Batch, res_json):
     cand = torch.nonzero(zn > torch.quantile(zn, 0.5), as_tuple=False).flatten()
     sel = cand[torch.linspace(0, len(cand) - 1, min(64, len(cand))).long()]
 
-    # Auswertung in fp64: MATLAB rechnet in double. Ein fp32-Export waere kein
-    # sauberer Test der Rekurrenzen, weil K0*z durch den Nullraum von K0
-    # Ausloeschung enthaelt -- der fp32-Rundungsfehler wird dort um Groessen-
-    # ordnungen verstaerkt und ueberdeckt den eigentlichen Vergleich.
+    # Auswertung in fp64: MATLAB rechnet in double -- nur so ist der Vergleich
+    # ein sauberer Test der handkodierten Rekurrenzen statt des fp32-Rundungs-
+    # rauschens der Gewichte.
     c = va.c[sel].double()
     z = va.z[sel].double()
     model.double()
-    with torch.no_grad():
-        pass
-    W_NL, F_NL, K_NL = net_terms(model, c, z)
-    W_NL, F_NL, K_NL = W_NL.detach(), F_NL.detach(), K_NL.detach()
+    W_tot, F_tot, K_tot = net_terms(model, c, z)
+    W_tot, F_tot, K_tot = W_tot.detach(), F_tot.detach(), K_tot.detach()
     model.float()
 
-    c_np = c.cpu().numpy()
-    K0_64 = torch.tensor(
-        np.stack([ref.k0_ref(cc.reshape(4, 2)) for cc in c_np]),
-        dtype=torch.float64, device=c.device)
-    F_lin = torch.einsum("bij,bj->bi", K0_64, z)
-
-    W_tot = 0.5 * (z * F_lin).sum(-1) + W_NL
-    F_tot = F_lin + F_NL
-    K_tot = K0_64 + K_NL
     ii = torch.tensor(TRIU_IDX[:, 0], device=K_tot.device)
     jj = torch.tensor(TRIU_IDX[:, 1], device=K_tot.device)
     md["test_C"] = c.cpu().numpy()
@@ -707,7 +688,7 @@ def build_mat(model, hidden, depth, va: Batch, res_json):
 # ---------------------------------------------------------------------------
 
 def main():
-    log("=== Residual-Energie-Netz quad4 nichtlinear (K0-Split, Sobolev) ===\n")
+    log("=== Voll-Energie-Netz quad4 nichtlinear (ohne K0-Split, Sobolev) ===\n")
     log(f"Logdatei: {log_path}")
     log(f"Device:   {device}")
     if device.type == "cuda":

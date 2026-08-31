@@ -4,25 +4,22 @@ function [What, p, H, meta] = quad4_nl_ai_model(chat, z)
 % DESCRIPTION
 %   Wertet das SKALARE Energiemodell auf der kanonischen Geometrie aus:
 %
-%     What(chat, z) = 0.5*z' K0(chat) z  +  Wnl(chat, z)
-%     p             = dWhat/dz  = K0*z + grad_z Wnl
-%     H             = d2What/dz2 = K0   + hess_z Wnl
+%     What(chat, z) = Wnet(chat, z)          volle Energie aus dem Netz
+%     p             = dWhat/dz               (Gradient des Netzes)
+%     H             = d2What/dz2             (Hessian des Netzes)
 %
-%   K0 ist die EXAKTE lineare Steifigkeit der kanonischen Geometrie
-%   (analytisch, 4-GP-Schleife mit linearer B-Matrix, E = d = 1, KEIN Cache).
-%   Wnl ist das neuronale Residual-Netz in Subtraktionsform
+%   Es gibt KEINE numerische Energie-/Steifigkeitsberechnung mehr im Element:
+%   das Netz traegt den quadratischen UND den nichtlinearen Anteil der
+%   Energie, Finte und Ke entstehen ausschliesslich durch Differentiation.
+%   Das Netz ist in Subtraktionsform
 %
-%     Wnl = f(ct,zt) - f(ct,0) - grad_zt f(ct,0)'*zt
+%     Wnet = f(ct,zt) - f(ct,0) - grad_zt f(ct,0)'*zt
 %
-%   -> Wnl(chat,0) = 0 und grad_z Wnl(chat,0) = 0 EXAKT (unabhaengig von den
-%   Gewichten). Damit ist Finte bei z = 0 exakt null und die Tangente dort
-%   exakt K0 plus dem (gelernten, kleinen) Rest hess_z Wnl(chat,0).
-%
-%   Warum der K0-Split: fuer StVenant ist What exakt ein Polynom 4. Grades in
-%   z. Der Split entfernt den quadratischen Term -- das Netz lernt nur den
-%   kubisch/quartischen Rest. Das macht die Zielfunktion leichter (kleineres
-%   Netz -> schnelleres Element) und laesst das Kleinamplituden-Regime
-%   (Newton-Endphase) exakt von K0 dominieren.
+%   -> Wnet(chat,0) = 0 und grad_z Wnet(chat,0) = 0 EXAKT (unabhaengig von
+%   den Gewichten). Damit ist Finte bei z = 0 exakt null. Die Tangente bei
+%   z = 0 (lineare Steifigkeit) ist GELERNT -- ihre Genauigkeit wird in
+%   Gate e4 (FEMSolid_ex_quad4_09_ai_nl_consistency.m) gegen das lineare
+%   Element geprueft.
 %
 %   Diese Funktion ist bewusst von der KETTE (Kanonisierung, Ko-Rotation,
 %   Rueckskalierung) getrennt: sie ist direkt gegen die Python-Oracle-
@@ -41,7 +38,7 @@ function [What, p, H, meta] = quad4_nl_ai_model(chat, z)
 %
 % ------------------------------------------------------------------------
 % LAST MODIFIED
-%   2026-08-18
+%   2026-08-31
 %
 % COPYRIGHT AND LICENSE
 %   Copyright (c) 2026 Daniel Materna
@@ -57,19 +54,8 @@ if isempty(NET)
     NET = load_network();
 end
 
-coords_canon = reshape(chat, 2, 4).';
-
-% --- K0: exakte lineare Steifigkeit der kanonischen Geometrie ------------
-K0 = k0_canonical(coords_canon, NET.C0);
-
-% --- Residual-Netz: Wnl, Gradient, Hessian ------------------------------
-[Wnl, pnl, Hnl] = net_residual(NET, chat, z);
-
-% --- Modell-Summe --------------------------------------------------------
-K0z  = K0 * z;
-What = 0.5 * (z.' * K0z) + Wnl;
-p    = K0z + pnl;
-H    = K0  + Hnl;
+% --- Netz: volle Energie, Gradient, Hessian ------------------------------
+[What, p, H] = net_total(NET, chat, z);
 
 if nargout > 3
     meta = struct('material', NET.material, 'nu_train', NET.nu_train, ...
@@ -81,42 +67,14 @@ end
 
 
 % ========================================================================
-function K0 = k0_canonical(coords_canon, C)
-%K0_CANONICAL Lineare Steifigkeit (Ke-Teil von element_quad4_lin, E = d = 1).
-%   Fuer StVenant ist das exakt die Tangente bei z = 0: S(0) = 0 loescht den
-%   geometrischen Term, und die nichtlineare B-Matrix faellt bei F = I auf die
-%   lineare zurueck. Kein Cache -- die Schleife ist billig (4 GP, KEINE
-%   Doppelknotenschleife).
-
-persistent GP
-if isempty(GP)
-    s = 1/sqrt(3);
-    GP = [-s -s; s -s; s s; -s s];
-end
-
-K0 = zeros(8, 8);
-for i = 1:4
-    [~, dh, detJ] = shape_quad4(coords_canon, GP(i, :));
-    hx = dh(:, 1).';  hy = dh(:, 2).';
-    B = zeros(3, 8);
-    B(1, 1:2:7) = hx;
-    B(2, 2:2:8) = hy;
-    B(3, 1:2:7) = hy;
-    B(3, 2:2:8) = hx;
-    K0 = K0 + (B.' * C * B) * detJ;            % w = 1, d = 1
-end
-end
-
-
-% ========================================================================
-function [Wnl, pnl, Hnl] = net_residual(NET, chat, z)
-%NET_RESIDUAL Residual-Energie und ihre ersten/zweiten Ableitungen nach z.
+function [Wt, pt, Ht] = net_total(NET, chat, z)
+%NET_TOTAL Volle Energie und ihre ersten/zweiten Ableitungen nach z.
 %
 %   Subtraktionsform (identisch im Training):
-%       Wnl = f(ct,zt) - f(ct,0) - grad_zt f(ct,0)'*zt
+%       Wt = f(ct,zt) - f(ct,0) - grad_zt f(ct,0)'*zt
 %   Daraus:
-%       grad_z Wnl = ( g(zt) - g(0) ) ./ zs
-%       hess_z Wnl = H(zt) ./ (zs*zs')
+%       grad_z Wt = ( g(zt) - g(0) ) ./ zs
+%       hess_z Wt = H(zt) ./ (zs*zs')
 %   mit zt = z./zs -- NUR Skalierung, KEIN Offset (sonst waere zt(z=0) ~= 0
 %   und die strukturelle Nullform gebrochen).
 
@@ -127,10 +85,10 @@ zt = z ./ zs;
 [f1, g1, H1] = mlp_val_grad_hess(NET, ct, zt, true);
 [f0, g0]     = mlp_val_grad_hess(NET, ct, zeros(8, 1), false);   % ohne Hessian
 
-Wnl = f1 - f0 - g0.' * zt;
-pnl = (g1 - g0) ./ zs;
-Hnl = H1 ./ (zs * zs.');
-Hnl = 0.5 * (Hnl + Hnl.');
+Wt = f1 - f0 - g0.' * zt;
+pt = (g1 - g0) ./ zs;
+Ht = H1 ./ (zs * zs.');
+Ht = 0.5 * (Ht + Ht.');
 end
 
 
@@ -253,7 +211,7 @@ for i = 1:numel(req)
     end
 end
 
-assert_meta(S, 'model_form',       'resid_energy_K0split_subtract_f0_gradf0');
+assert_meta(S, 'model_form',       'total_energy_subtract_f0_gradf0');
 assert_meta(S, 'activation',       'GELU_erf');
 assert_meta(S, 'canonicalization', 'edge_n1n2_to_pos_x_after_centroid_Lc');
 assert_meta(S, 'state_corotation', 'mean_polar_angle_at_center_removed__u_c=R(-th)(x+u)-x');
@@ -283,7 +241,6 @@ NET.z_scale = double(S.input_norm_z_scale(:));
 NET.nu_train  = double(S.nu_train);
 NET.material  = strtrim(char(S.material));
 NET.condition = strtrim(char(S.condition));
-NET.C0 = hooke_C(1.0, NET.nu_train, NET.condition);
 
 NET.E_max = 0.2;
 if isfield(S, 'state_E_max')
@@ -301,22 +258,4 @@ if ~strcmpi(val, expected)
          'Das Element wuerde damit stumm falsch rechnen -- Netz neu trainieren.'], ...
         field, val, expected);
 end
-end
-
-
-% ========================================================================
-function C = hooke_C(E, nu, condition)
-%HOOKE_C Materialmatrix in Voigt-Notation (Evec = [E11, E22, 2*E12]).
-lam = E * nu / ((1 + nu) * (1 - 2*nu));
-mu  = E / (2 * (1 + nu));
-switch lower(condition)
-    case 'planestrain'
-        c11 = lam + 2*mu;  c12 = lam;
-    case 'planestress'
-        c11 = lam/(nu - 1) + 2*mu + 2*lam;
-        c12 = lam/(nu - 1) + 2*lam;
-    otherwise
-        error('quad4_nl_ai_model:Condition', 'Unbekannter Zustand: %s', condition);
-end
-C = [c11 c12 0; c12 c11 0; 0 0 mu];
 end
