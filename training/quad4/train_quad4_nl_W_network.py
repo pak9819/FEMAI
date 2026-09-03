@@ -118,7 +118,7 @@ LAMBDA_K = 1.0
 # Default h64/d3: ohne K0-Split muss das Netz auch den quadratischen Term
 # (implizit die lineare Steifigkeit als Funktion der Geometrie) tragen --
 # das braucht mehr Kapazitaet als das h48-Residualnetz.
-HIDDEN_DEFAULT = int(os.environ.get("QUAD4_HIDDEN", 64))
+HIDDEN_DEFAULT = int(os.environ.get("QUAD4_HIDDEN", 32))
 DEPTH_DEFAULT = int(os.environ.get("QUAD4_DEPTH", 3))
 SWEEP_HIDDEN = [48, 64, 96, 128]
 SWEEP_DEPTH = [3, 4]
