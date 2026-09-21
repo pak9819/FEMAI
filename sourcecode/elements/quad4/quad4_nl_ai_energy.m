@@ -1,4 +1,4 @@
-function [Wphys, Finte, Ke, dg, meta] = quad4_nl_ai_energy(coord_e, mat_e, Ue)
+function [Wphys, Finte, Ke, dg, meta] = quad4_nl_ai_energy(coord_e, mat_e, Ue, MATNAME)
 %QUAD4_NL_AI_ENERGY Kanonisierungs- und Ko-Rotations-Kette des KI-quad4.
 % ------------------------------------------------------------------------
 % DESCRIPTION
@@ -30,17 +30,19 @@ function [Wphys, Finte, Ke, dg, meta] = quad4_nl_ai_energy(coord_e, mat_e, Ue)
 %   coord_e  (4x2) Elementknotenkoordinaten
 %   mat_e    (1xn) Materialkarte [E, nu, d, ...]
 %   Ue       (8x1) Elementverschiebungen
+%   MATNAME  Materialname (optional, Standard 'StVenant') -- waehlt das Netz
 %
 % OUTPUT
 %   Wphys    Formaenderungsenergie des Elements
 %   Finte    (8x1) innerer Kraftvektor
 %   Ke       (8x8) tangentiale Steifigkeitsmatrix
-%   dg       Diagnose (maxE am Mittelpunkt, Lc, theta) -- nur auf Anforderung
+%   dg       Diagnose am Mittelpunkt (maxE = ||E_green||, hencky = ||ln U||,
+%            J = det F, Lc, theta) -- nur auf Anforderung
 %   meta     Netz-Metadaten -- nur auf Anforderung
 %
 % ------------------------------------------------------------------------
 % LAST MODIFIED
-%   2026-08-31
+%   2026-09-17
 %
 % COPYRIGHT AND LICENSE
 %   Copyright (c) 2026 Daniel Materna
@@ -57,6 +59,10 @@ if isempty(P)
     ty = repmat([0; 1], 4, 1);
     P     = eye(8) - (tx*tx.' + ty*ty.') / 4;      % Translationsprojektor
     Sigma = kron(eye(4), [0 1; -1 0]);             % dR(-th)/dth = R(-th)*Sigma
+end
+
+if nargin < 4
+    MATNAME = 'StVenant';
 end
 
 Emod = mat_e(1);
@@ -114,9 +120,9 @@ z = P * (Bm * y - xhat);
 % 4. Kanonisches Energiemodell (Voll-Energie-Netz, keine numerische Energie)
 % ------------------------------------------------------------------------
 if nargout > 4
-    [What, p, H, meta] = quad4_nl_ai_model(xhat, z);
+    [What, p, H, meta] = quad4_nl_ai_model(xhat, z, MATNAME);
 else
-    [What, p, H] = quad4_nl_ai_model(xhat, z);
+    [What, p, H] = quad4_nl_ai_model(xhat, z, MATNAME);
 end
 
 % ------------------------------------------------------------------------
@@ -150,6 +156,9 @@ if nargout > 3
     Fdef = eye(2) + Un.' * dh0;
     Eg   = 0.5 * (Fdef.' * Fdef - eye(2));
     dg.maxE  = norm(Eg, 'fro');
+    dg.J     = det(Fdef);
+    lam2     = max(eig(Fdef.' * Fdef), realmin);   % Quadrate der Hauptstreckungen
+    dg.hencky = norm(0.5 * log(lam2));
     dg.Lc    = Lc;
     dg.theta = th;
 end

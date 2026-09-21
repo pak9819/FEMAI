@@ -3,8 +3,13 @@ __pycache__/
 training/quad4/arch_sweep/
 training/quad4/arch_sweep_nl_K/
 training/quad4/arch_sweep_nl_W/
+training/quad4/arch_sweep_nl_W_neohooke/
 training/quad4/*.log
 # regenerierbar via generate_newton_trajectories.m
 training/quad4/newton_traj_states.mat
+# regenerierbar via generate_newton_trajectories_neohooke.m / export_nh_oracle.m
+training/quad4/newton_traj_states_neohooke.mat
+training/quad4/nh_oracle.mat
+training/quad4/nh_oracle_states.mat
 # Datensatz-Cache des Trainings (regenerierbar, gross)
 training/quad4/dataset_cache_*.npz

@@ -47,7 +47,12 @@ fprintf('=== quad4 NL-KI: Konsistenz- und Ketten-Verifikation (Gates d, e) ===\n
 
 rng(4242);
 
+% Material waehlt das Netz ('StVenant' oder 'NeoHooke'). Fuer Laeufe ohne
+% Editor ueberschreibt die Umgebungsvariable QUAD4_MATNAME den Wert.
 MATNAME = 'StVenant';
+if ~isempty(getenv('QUAD4_MATNAME'))
+    MATNAME = getenv('QUAD4_MATNAME');
+end
 MATCOND = 'planeStrain';
 NU      = 0.3;
 E_MOD   = 1000.0;
@@ -56,13 +61,13 @@ D_THICK = 2.0;
 N_ELEM  = 20;
 FD_STEP = 1e-6;
 
-netFile = fullfile(fileparts(which('element_quad4_nl_ai')), 'quad4_nl_W_network.mat');
+netFile = quad4_nl_ai_network_file(MATNAME);
 if ~exist(netFile, 'file')
-    error('quad4_nl_W_network.mat fehlt -- zuerst train_quad4_nl_W_network.py ausfuehren.');
+    error('%s fehlt -- zuerst das Trainingsskript fuer %s ausfuehren.', netFile, MATNAME);
 end
 NET = load(netFile);
 
-fprintf('Netz: %s\n', strtrim(char(NET.model_form)));
+fprintf('Material: %s | Netz: %s\n', MATNAME, strtrim(char(NET.model_form)));
 fprintf('      GELU, %d Gewichtslagen, Hidden %d, Tiefe %d\n', ...
     round(NET.num_linear_layers), round(NET.hidden), round(NET.depth));
 if isfield(NET, 'git_hash')
@@ -101,7 +106,7 @@ for i = 1:nTest
 
     % Das kanonische Modell wird DIREKT geprueft (ohne Kette) -- genau die
     % Groessen, die Python als Oracle exportiert hat.
-    [Wm, Fm, Km] = quad4_nl_ai_model(chat, z);
+    [Wm, Fm, Km] = quad4_nl_ai_model(chat, z, MATNAME);
 
     eW(i) = abs(Wm - NET.test_W(i)) / max(abs(NET.test_W(i)), floorW);
     eF(i) = norm(Fm - NET.test_F(i,:).') / max(norm(NET.test_F(i,:)), floorF);
@@ -132,13 +137,13 @@ for k = 1:N_ELEM
     Ue      = random_state(coord_e);
 
     % --- e1: Finte vs. zentrale Differenzen der Energie ------------------
-    [~, Finte, Ke] = quad4_nl_ai_energy(coord_e, mat_e, Ue);
+    [~, Finte, Ke] = quad4_nl_ai_energy(coord_e, mat_e, Ue, MATNAME);
     gFD = zeros(8,1);
     for j = 1:8
         up = Ue; up(j) = up(j) + FD_STEP;
         um = Ue; um(j) = um(j) - FD_STEP;
-        Wp = quad4_nl_ai_energy(coord_e, mat_e, up);
-        Wm = quad4_nl_ai_energy(coord_e, mat_e, um);
+        Wp = quad4_nl_ai_energy(coord_e, mat_e, up, MATNAME);
+        Wm = quad4_nl_ai_energy(coord_e, mat_e, um, MATNAME);
         gFD(j) = (Wp - Wm) / (2*FD_STEP);
     end
     e1(k) = norm(gFD - Finte) / max(norm(Finte), 1e-12);
@@ -148,8 +153,8 @@ for k = 1:N_ELEM
     for j = 1:8
         up = Ue; up(j) = up(j) + FD_STEP;
         um = Ue; um(j) = um(j) - FD_STEP;
-        [~, Fp] = quad4_nl_ai_energy(coord_e, mat_e, up);
-        [~, Fm] = quad4_nl_ai_energy(coord_e, mat_e, um);
+        [~, Fp] = quad4_nl_ai_energy(coord_e, mat_e, up, MATNAME);
+        [~, Fm] = quad4_nl_ai_energy(coord_e, mat_e, um, MATNAME);
         JFD(:,j) = (Fp - Fm) / (2*FD_STEP);
     end
     e2(k) = norm(JFD - Ke, 'fro') / max(norm(Ke, 'fro'), 1e-12);
@@ -159,11 +164,11 @@ for k = 1:N_ELEM
     R  = [cos(th) -sin(th); sin(th) cos(th)];
     shift = 5*(rand(1,2) - 0.5);
     Urig  = (coord_e * R.' + shift) - coord_e;
-    [~, Frig, Krig] = quad4_nl_ai_energy(coord_e, mat_e, reshape(Urig.', [], 1));
+    [~, Frig, Krig] = quad4_nl_ai_energy(coord_e, mat_e, reshape(Urig.', [], 1), MATNAME);
     e3(k) = norm(Frig) / max(norm(Krig, 'fro'), 1e-12);   % dimensionslos
 
     % --- e4: Ke bei u -> 0 gegen das LINEARE Element ----------------------
-    [~, ~, K0ai] = quad4_nl_ai_energy(coord_e, mat_e, zeros(8,1));
+    [~, ~, K0ai] = quad4_nl_ai_energy(coord_e, mat_e, zeros(8,1), MATNAME);
     Klin = element_quad4_lin(coord_e, mat_e, [0;0], 0, zeros(8,1), [], gp, w, ...
                              'Hooke', MATCOND, struct());
     e4(k) = norm(K0ai - Klin, 'fro') / norm(Klin, 'fro');

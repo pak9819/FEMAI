@@ -1,4 +1,4 @@
-function [What, p, H, meta] = quad4_nl_ai_model(chat, z)
+function [What, p, H, meta] = quad4_nl_ai_model(chat, z, MATNAME)
 %QUAD4_NL_AI_MODEL Kanonisches Energiemodell des nichtlinearen KI-quad4.
 % ------------------------------------------------------------------------
 % DESCRIPTION
@@ -27,8 +27,10 @@ function [What, p, H, meta] = quad4_nl_ai_model(chat, z)
 %   FEMSolid_ex_quad4_09_ai_nl_consistency.m).
 %
 % INPUT
-%   chat  (8x1) kanonische Knotenkoordinaten [x1;y1;...;x4;y4]
-%   z     (8x1) kanonischer, ko-rotierter, translations-projizierter Zustand
+%   chat     (8x1) kanonische Knotenkoordinaten [x1;y1;...;x4;y4]
+%   z        (8x1) kanonischer, ko-rotierter, translations-projizierter Zustand
+%   MATNAME  Materialname (optional, Standard 'StVenant'); waehlt das Netz
+%            ueber quad4_nl_ai_network_file
 %
 % OUTPUT
 %   What  Skalar   Energie (kanonisch, E = d = 1)
@@ -38,7 +40,7 @@ function [What, p, H, meta] = quad4_nl_ai_model(chat, z)
 %
 % ------------------------------------------------------------------------
 % LAST MODIFIED
-%   2026-08-31
+%   2026-09-17
 %
 % COPYRIGHT AND LICENSE
 %   Copyright (c) 2026 Daniel Materna
@@ -48,10 +50,24 @@ function [What, p, H, meta] = quad4_nl_ai_model(chat, z)
 %   Licensed under the MIT License. See LICENSE file in the project root.
 % ------------------------------------------------------------------------
 
-persistent NET
+persistent NETS NET lastName
 
-if isempty(NET)
-    NET = load_network();
+if nargin < 3
+    MATNAME = 'StVenant';
+end
+
+% Hot-Path: dasselbe Material wie beim letzten Aufruf -> Netz direkt aus
+% dem Cache (ein String-Vergleich). Dateiname und Laden nur beim Wechsel.
+if isempty(lastName) || ~strcmp(MATNAME, lastName)
+    [netFile, matKey] = quad4_nl_ai_network_file(MATNAME);
+    if isempty(NETS)
+        NETS = struct();
+    end
+    if ~isfield(NETS, matKey)
+        NETS.(matKey) = load_network(netFile, matKey);
+    end
+    NET      = NETS.(matKey);
+    lastName = MATNAME;
 end
 
 % --- Netz: volle Energie, Gradient, Hessian ------------------------------
@@ -60,6 +76,8 @@ end
 if nargout > 3
     meta = struct('material', NET.material, 'nu_train', NET.nu_train, ...
                   'condition', NET.condition, 'E_max', NET.E_max, ...
+                  'state_measure', NET.state_measure, 'H_max', NET.H_max, ...
+                  'J_min', NET.J_min, 'J_max', NET.J_max, ...
                   'num_linear_layers', NET.L);
 end
 
@@ -189,15 +207,16 @@ end
 
 
 % ========================================================================
-function NET = load_network()
+function NET = load_network(netFile, matKey)
 %LOAD_NETWORK Netz + Metadaten einmalig laden und aufbereiten.
 %   HARTE Fehler (kein Warning) bei allem, was stumm falsche Physik ergaebe.
 
-netFile = fullfile(fileparts(mfilename('fullpath')), 'quad4_nl_W_network.mat');
 if ~exist(netFile, 'file')
+    [~, name, ext] = fileparts(netFile);
     error('quad4_nl_ai_model:NetworkMissing', ...
-        ['quad4_nl_W_network.mat nicht gefunden.\n' ...
-         'Bitte zuerst training/quad4/train_quad4_nl_W_network.py ausfuehren.']);
+        ['%s nicht gefunden.\n' ...
+         'Bitte zuerst das Trainingsskript fuer %s in training/quad4/ ausfuehren.'], ...
+        [name ext], matKey);
 end
 S = load(netFile);
 
@@ -242,9 +261,28 @@ NET.nu_train  = double(S.nu_train);
 NET.material  = strtrim(char(S.material));
 NET.condition = strtrim(char(S.condition));
 
+[~, netKey] = quad4_nl_ai_network_file(NET.material);
+if ~strcmp(netKey, matKey)
+    error('quad4_nl_ai_model:MetaMismatch', ...
+        'Die Netzdatei fuer "%s" enthaelt ein Netz fuer "%s".', matKey, NET.material);
+end
+
+% Zustands-Huelle: StVenant ueber ||E_green||, Neo-Hooke ueber die
+% Hencky-Dehnung ||ln U|| und das Volumenverhaeltnis J.
 NET.E_max = 0.2;
 if isfield(S, 'state_E_max')
     NET.E_max = double(S.state_E_max);
+end
+NET.state_measure = 'E_green';
+NET.H_max = Inf;  NET.J_min = 0;  NET.J_max = Inf;
+if isfield(S, 'state_measure')
+    NET.state_measure = strtrim(char(S.state_measure));
+end
+if strcmpi(NET.state_measure, 'hencky_J')
+    NET.E_max = Inf;
+    NET.H_max = double(S.state_H_max);
+    NET.J_min = double(S.state_J_min);
+    NET.J_max = double(S.state_J_max);
 end
 end
 

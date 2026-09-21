@@ -2,40 +2,33 @@
 % ------------------------------------------------------------------------
 % DESCRIPTION
 %   Vergleicht das klassische nichtlineare quad4-Element (element_quad4_nl,
-%   Total Lagrange) mit dem Deep-Learned-Element (element_quad4_nl_ai), das
-%   ein ENERGIEPOTENTIAL lernt und Finte sowie Ke daraus durch Differentiation
-%   gewinnt (Residual-Energie mit analytischem K0-Split).
+%   Total Lagrange) mit dem Deep-Learned-Element (element_quad4_nl_ai). Das
+%   KI-Element lernt die volle Formaenderungsenergie; Finte und Ke entstehen
+%   daraus durch Differentiation (Ke = dFinte/dUe per Konstruktion).
 %
-%   Ausser der Volumenlast bleibt keine Mechanik analytisch. Vier
-%   Eigenschaften stehen im Fokus:
+%   Fuenf geometrisch nichtlineare Strukturen mit bewusst MODERATEN Lasten
+%   Die inneren Knoten werden um DISTORTION
+%   (Anteil der Elementgroesse) zufaellig verschoben: regulaere Quadrat-Netze
+%   sind im Training ueber die Newton-Trajektorien stark vertreten und
+%   wuerden die Genauigkeit zu guenstig darstellen. DISTORTION = 0 liefert
+%   die regulaeren Netze. Fuer grosse Verformungen
+%   siehe FEMSolid_ex_quad4_10_ai_nl_large_deformation_benchmark.m.
 %
-%     (K) KONVERGENZ: Ke ist per Konstruktion exakt die Jacobimatrix von
-%         Finte (gemeinsames Potential) -> Newton konvergiert wieder mit der
-%         Rate des analytischen Elements. Erwartung: gleiche Iterationszahl
-%         (+/- 0..3). Deutlich mehr Iterationen waeren ein Alarmsignal.
+%   Ausgewertet werden:
+%     (K) KONVERGENZ  Newton-Iterationen FEM vs. KI. Gleiche Zahlen belegen
+%                     die Konsistenz von Ke und Finte -- NICHT die
+%                     Genauigkeit des Netzes.
+%     (G) GENAUIGKEIT rel. Fehler der Verschiebungen (dU) und der
+%                     von-Mises-Spannung (dVM, analytisch aus U berechnet),
+%                     dazu Element-Fehler von Finte und Ke (Frobenius) am
+%                     deformierten Zustand, jeweils Mittel und P99.
+%     (Z) ZEIT        Assemblierung und Gesamtloesung.
 %
-%     (G) GENAUIGKEIT der konvergierten Loesung -- der gelernte Finte-Fehler
-%         geht DIREKT ins Gleichgewicht ein:
-%         - rel. L2-Fehler der Verschiebungen (dU) am Endlastzustand
-%         - rel. L2-Fehler der von-Mises-Spannung (dVM)
-%         - Element-Fehler von Finte UND Ke an einer Stichprobe, ausgewertet
-%           am DEFORMIERTEN Zustand -- mit MITTELWERT UND P99, denn Newton
-%           wird vom schlechtesten Element limitiert, nicht vom mittleren.
-%
-%     (Z) ZEIT auf ZWEI Ebenen (Gate h): je Assemblierung UND Gesamtloesung
-%         (Assemblierungen x Iterationen). Die Gesamtzeit ist die ehrliche
-%         Metrik fuer das Forschungsziel; dazu ein Kostenmodell (MACs vs.
-%         FLOPs) zur Extrapolation auf teure Elemente.
-%
-%     (T) TOLERANZ: modell-ehrliches, RELATIVES Konvergenzkriterium
-%         (TOL_REL * ||Fext||) statt absolut 1e-8 -- identisch fuer beide
-%         Backends. newton.m bleibt unangetastet.
+%   Konvergenzkriterium: relativ, TOL_REL * ||Fext||, identisch fuer beide
+%   Backends.
 %
 %   Material: St.-Venant-Kirchhoff, planeStrain, nu = 0.3 (fest ins Netz
 %   eintrainiert, wird beim Laden HART geprueft). E und Dicke d sind frei.
-%   ACHTUNG Gueltigkeit: das Netz kennt nur die trainierte ZUSTANDS-Huelle
-%   (||E_green|| <= E_MAX); die Zustandsrotation ist dank Ko-Rotation
-%   unbeschraenkt. Die Benchmark-Lasten muessen in der Dehnungs-Huelle bleiben.
 %
 % PREREQUISITE
 %   Run training/quad4/train_quad4_nl_W_network.py first to generate
@@ -43,7 +36,7 @@
 %
 % ------------------------------------------------------------------------
 % LAST MODIFIED
-%   2026-07-08
+%   2026-09-16
 %
 % COPYRIGHT AND LICENSE
 %   Copyright (c) 2026 Daniel Materna
@@ -65,50 +58,28 @@ fprintf('    St.-Venant-Kirchhoff, planeStrain, nu = 0.3, Total Lagrange\n\n');
 % ------------------------------------------------------------------------
 % Feste Annahmen
 % ------------------------------------------------------------------------
-E_MOD   = 1.0e3;       % E-Modul (moderat -> gut konvergierende geom. Nichtlin.)
+E_MOD   = 1.0e3;
 NU      = 0.3;
 D_THICK = 1.0;
 
-MATNAME = 'StVenant';
-MATCOND = 'planeStrain';
-
-NUM_STEPS = 6;         % Lastschritte (Lastinkrementierung)
-MAX_ITER  = 150;        % max. Newton-Iterationen je Lastschritt
-
-% Modell-ehrliches, RELATIVES Konvergenzkriterium (Plan Gate f):
-%   tolR = TOL_REL * ||Fext(frei)||
-% Ein gelerntes Residuum kann das absolute 1e-8 aus init_setup prinzipiell
-% nicht erreichen -- unterhalb der Modellgenauigkeit zu iterieren bringt
-% physikalisch nichts. Beide Backends bekommen denselben Wert.
-TOL_REL   = 1e-6;
-
-% ACHTUNG LASTHOEHE: Die Lasten sind bewusst KLEIN gewaehlt, damit die
-% Verschiebungszustaende in der Trainings-Huelle bleiben (||E_green|| <= ~0.2,
-% Rotation <= ~45 Grad). Zu grosse Lasten (z.B. Kragarm-Spitzenauslenkung in
-% Groessenordnung der Laenge) fuehren aus der Huelle -> das Netz extrapoliert,
-% Ke/Finte werden unbrauchbar und Newton divergiert. Erst mit
-% FEMSolid_ex_quad4_08_ai_nl_check.m die Element-Genauigkeit in der Huelle
-% pruefen, dann hier die Lasten so hoch wie moeglich (aber in der Huelle) setzen.
-
-% Netzfeinheit: nl ist pro Loesung teuer (Newton x Lastschritte) -> moderat.
-% MESH_SCALE skaliert alle Netze gemeinsam (1 = klein/schnell).
-MESH_SCALE = 2;
-
-% Zeitmessung Assemblierung (am deformierten Zustand)
-R_ELEM    = 12;
-
-% Element-Fehler (Finte/Ke) auf einer Stichprobe
-KE_SAMPLE = 1000;
+NUM_STEPS  = 6;        % Lastschritte
+MAX_ITER   = 150;      % max. Newton-Iterationen je Lastschritt
+TOL_REL    = 1e-6;     % rel. Konvergenzkriterium (beide Backends)
+MESH_SCALE = 2;        % skaliert alle Netze gemeinsam
+DISTORTION = 0.2;      % innere Knoten +-20 % der Elementgroesse (0 = regulaer)
+R_ELEM     = 12;       % Wiederholungen fuer die Assemblierungszeit
+KE_SAMPLE  = 1000;     % Element-Fehler auf einer Stichprobe
 
 % ------------------------------------------------------------------------
-% Strukturen definieren (geometrisch nichtlineare Szenarien)
+% Strukturen
 % ------------------------------------------------------------------------
-S  = define_nl_structures(E_MOD, NU, D_THICK, MESH_SCALE);
+S  = define_nl_structures(E_MOD, NU, D_THICK, MESH_SCALE, DISTORTION);
 nS = numel(S);
 
-% ------------------------------------------------------------------------
-% (1) Strukturen plotten (unverformt + Lagerung/Last)
-% ------------------------------------------------------------------------
+[ratioMax, angMin, angMax] = mesh_quality(S);
+fprintf('Netzverzerrung %.0f %%: max. detJ-Verhaeltnis %.2f, Innenwinkel %.0f..%.0f Grad\n\n', ...
+    100*DISTORTION, ratioMax, angMin, angMax);
+
 figure('Name', 'NL-Benchmark: Strukturen', 'NumberTitle', 'off', ...
        'Position', [60 60 1400 500]);
 for k = 1:nS
@@ -120,203 +91,102 @@ sgtitle('NL-Benchmark: Ausgangsgeometrie, Lagerung (rot), Last (blau)');
 drawnow;
 
 % ------------------------------------------------------------------------
-% (2) Benchmark-Schleife
+% Benchmark-Schleife
 % ------------------------------------------------------------------------
-relU     = zeros(nS,1);   % rel. L2-Fehler Verschiebung [%]
-relVM    = zeros(nS,1);   % rel. L2-Fehler von-Mises    [%]
-fintErr  = zeros(nS,1);   % mittl. Element-Finte-Fehler [%] (alle Element-DOFs)
-fintFree = zeros(nS,1);   % glob. Finte-Fehler NUR freie DOFs [%]
-keErrN   = zeros(nS,4);   % mittl. Element-Ke-Fehler [%] in [Frob, Spektral-2, 1-Norm, MaxAbs]
-itFEM    = zeros(nS,1);   % Newton-Iterationen gesamt (FEM)
-itAI     = zeros(nS,1);   % Newton-Iterationen gesamt (KI)
-tElemFEM = zeros(nS,1);   % Assemblierung deformiert   [s]
-tElemAI  = zeros(nS,1);   % Assemblierung deformiert   [s]
-tSolFEM  = zeros(nS,1);   % Gesamt-Loesungszeit        [s]  (Gate h1)
-tSolAI   = zeros(nS,1);   % Gesamt-Loesungszeit        [s]  (Gate h1)
-fintP99  = zeros(nS,1);   % P99 des Element-Finte-Fehlers [%]
-keP99    = zeros(nS,1);   % P99 des Element-Ke-Fehlers    [%]
+relU     = nan(nS,1);   relVM   = nan(nS,1);
+fintErr  = zeros(nS,1); fintP99 = zeros(nS,1);
+keErr    = zeros(nS,1); keP99   = zeros(nS,1);
+itFEM    = zeros(nS,1); itAI    = zeros(nS,1);
+okFEM    = false(nS,1); okAI    = false(nS,1);
+tElemFEM = zeros(nS,1); tElemAI = zeros(nS,1);
+tSolFEM  = zeros(nS,1); tSolAI  = zeros(nS,1);
 nelem    = zeros(nS,1);
-okFEM    = false(nS,1);
-okAI     = false(nS,1);
 
 fprintf('Loese (NUM_STEPS = %d, MAX_ITER = %d) ...\n\n', NUM_STEPS, MAX_ITER);
-fprintf([' Nr | Struktur                     |  NEL  | itFEM | itKI | Fint(el) | Fint(frei) | Ke(Frob) | dU    | dVM\n']);
-fprintf([' ---|------------------------------|-------|-------|------|----------|------------|----------|-------|------\n']);
+fprintf(' Nr | Struktur                      |  NEL | itFEM | itKI |   dU    |   dVM\n');
+fprintf(' ---|-------------------------------|------|-------|------|---------|--------\n');
 
 for k = 1:nS
-
-    % Modell-ehrliches, RELATIVES Konvergenzkriterium -- identisch fuer beide
-    % Backends (Gate f). newton.m bleibt unangetastet.
-    tolR_k = reference_tolR(S(k), NUM_STEPS, MAX_ITER, TOL_REL);
-
+    tolR_k    = reference_tolR(S(k), NUM_STEPS, MAX_ITER, TOL_REL);
     model_fem = make_nl_model(S(k), 'matlab', NUM_STEPS, MAX_ITER, tolR_k);
     model_ai  = make_nl_model(S(k), 'ai',     NUM_STEPS, MAX_ITER, tolR_k);
+    nelem(k)  = model_fem.info.NEL;
 
-    nelem(k) = model_fem.info.NEL;
-
-    % --- Nichtlineare Loesungen (mit Gesamtzeit fuer Gate h1) ---
     t0 = tic;  [U_fem, res_fem, itFEM(k), okFEM(k)] = solve_nl_quiet(model_fem);
     tSolFEM(k) = toc(t0);
     t0 = tic;  [U_ai,  res_ai,  itAI(k),  okAI(k) ] = solve_nl_quiet(model_ai);
     tSolAI(k)  = toc(t0);
 
-    % --- Genauigkeit (konvergierte Loesung) ---
     relU(k)  = norm(U_ai - U_fem) / max(norm(U_fem), eps) * 100;
     vmF = res_fem.vonMises.node;  vmA = res_ai.vonMises.node;
     relVM(k) = norm(vmA - vmF) / max(norm(vmF), eps) * 100;
 
-    % --- Element-Fehler Finte/Ke am DEFORMIERTEN Zustand (FEM-Loesung) ---
-    %     fintErr: Element-Finte-Fehler ueber ALLE Element-DOFs (netznah).
-    %     keErrN : Ke-Fehler in mehreren Normen (Frob, Spektral, 1-Norm, MaxAbs).
-    [fintErr(k), keErrN(k,:), fintP99(k), keP99(k)] = ...
+    [fintErr(k), keErr(k), fintP99(k), keP99(k)] = ...
         elem_nl_error(model_fem, model_ai, U_fem, KE_SAMPLE);
 
-    % --- Globaler Finte-Fehler NUR auf den freien Freiheitsgraden ---------
-    %     Newton loest das Gleichgewicht Fint = Fext ausschliesslich auf den
-    %     freien DOFs (newton.m); an den gebundenen DOFs steht die (grosse)
-    %     Auflagerreaktion, die die Norm sonst verfaelscht. Daher: nur freie.
-    fintFree(k) = global_fint_error_free(model_fem, model_ai, U_fem);
-
-    % --- Zeit: Element-Assemblierung am deformierten Zustand ---
     tElemFEM(k) = time_assembly(model_fem, U_fem, R_ELEM);
     tElemAI(k)  = time_assembly(model_ai,  U_fem, R_ELEM);
 
-    fprintf(' %2d | %-28s | %5d | %5d | %4d | %7.2f%% | %9.2f%% | %7.2f%% | %5.2f%%| %4.2f%%\n', ...
-        k, S(k).name, nelem(k), itFEM(k), itAI(k), fintErr(k), fintFree(k), keErrN(k,1), relU(k), relVM(k));
+    fprintf(' %2d | %-29s | %4d | %5d | %4d | %6.3f%% | %6.3f%%\n', ...
+        k, S(k).name, nelem(k), itFEM(k), itAI(k), relU(k), relVM(k));
 end
 
 % ------------------------------------------------------------------------
-% Zusatztabelle: Ke-Fehler in verschiedenen Matrixnormen
-%   Hinweis: Ke ist symmetrisch -> 1-Norm == inf-Norm (identisch), daher nur
-%   die 1-Norm gezeigt. Spektralnorm (groesster Singulaerwert) beschraenkt
-%   den relativen Fehler in JEDER Verformungsmode und ist physikalisch am
-%   aussagekraeftigsten; MaxAbs zeigt den groessten Einzeleintrags-Fehler.
-% ------------------------------------------------------------------------
-fprintf('\n--- Ke-Fehler je Struktur in verschiedenen Normen [%%] ---\n');
-fprintf([' Nr | Struktur                     | Frobenius | Spektral-2 |  1-Norm  |  MaxAbs\n']);
-fprintf([' ---|------------------------------|-----------|------------|----------|---------\n']);
-for k = 1:nS
-    fprintf(' %2d | %-28s | %8.2f  | %9.2f  | %7.2f  | %7.2f\n', ...
-        k, S(k).name, keErrN(k,1), keErrN(k,2), keErrN(k,3), keErrN(k,4));
-end
-
-% ------------------------------------------------------------------------
-% Zusammenfassung
+% Element-Fehler und Zeiten
 % ------------------------------------------------------------------------
 spElem = tElemFEM ./ max(tElemAI, eps);
+spSol  = tSolFEM  ./ max(tSolAI,  eps);
 
-fprintf('\n--- Zusammenfassung (%d NL-Strukturen) ---\n', nS);
-if ~all(okFEM) || ~all(okAI)
-    fprintf('  WARNUNG: nicht alle Loesungen konvergiert (FEM ok: %d/%d, KI ok: %d/%d)\n', ...
-        sum(okFEM), nS, sum(okAI), nS);
-end
-fprintf('  Newton-Iterationen: FEM gesamt %d | KI gesamt %d  -> Differenz %d\n', ...
-    sum(itFEM), sum(itAI), sum(itAI) - sum(itFEM));
-fprintf('  Assemblierung (deformiert): FEM %.2f ms | KI %.2f ms  -> Speedup Median %.2fx\n', ...
-    1e3*sum(tElemFEM), 1e3*sum(tElemAI), median(spElem));
-fprintf('  Genauigkeit: dU           Median %.3f %% (max %.3f %%)\n', median(relU), max(relU));
-fprintf('               dVM          Median %.3f %% (max %.3f %%)\n', median(relVM), max(relVM));
-fprintf('               Finte (el)   Median %.3f %% (max %.3f %%)\n', median(fintErr), max(fintErr));
-fprintf('               Finte (frei) Median %.3f %% (max %.3f %%)\n', median(fintFree), max(fintFree));
-fprintf('               Ke Frobenius Median %.3f %% (max %.3f %%)\n', median(keErrN(:,1)), max(keErrN(:,1)));
-fprintf('               Ke Spektral  Median %.3f %% (max %.3f %%)\n', median(keErrN(:,2)), max(keErrN(:,2)));
-fprintf('               Ke 1-Norm    Median %.3f %% (max %.3f %%)\n', median(keErrN(:,3)), max(keErrN(:,3)));
-fprintf('               Ke MaxAbs    Median %.3f %% (max %.3f %%)\n', median(keErrN(:,4)), max(keErrN(:,4)));
-if all(okAI) && sum(itAI) <= sum(itFEM) + 3*nS
-    fprintf('  => Newton konvergiert robust (Konsistenz greift: hoechstens wenige Zusatziterationen).\n');
-elseif ~all(okAI)
-    fprintf('  => WARNUNG: KI-Loesung nicht ueberall konvergiert -- Zustands-Huelle/Lasten pruefen.\n');
-else
-    fprintf('  => KI braucht deutlich mehr Newton-Iterationen -- Ke/Finte pruefen.\n');
-end
-
-% ------------------------------------------------------------------------
-% Gate f: Genauigkeit inkl. Perzentilen
-% ------------------------------------------------------------------------
-fprintf('\n--- Gate f: Genauigkeit (mean UND P99 je Struktur) ---\n');
-fprintf(' Nr | Struktur                     | Fint mean |  Fint P99 |  Ke mean |   Ke P99\n');
-fprintf(' ---|------------------------------|-----------|-----------|----------|---------\n');
+fprintf('\n--- Element-Fehler am deformierten Endzustand [%%] und Zeiten ---\n');
+fprintf(' Nr | Struktur                      | Finte mean | Finte P99 | Ke mean | Ke P99 | Asm-Speedup | Ges-Speedup\n');
+fprintf(' ---|-------------------------------|------------|-----------|---------|--------|-------------|------------\n');
 for k = 1:nS
-    fprintf(' %2d | %-28s | %8.2f%% | %8.2f%% | %7.2f%% | %7.2f%%\n', ...
-        k, S(k).name, fintErr(k), fintP99(k), keErrN(k,1), keP99(k));
+    fprintf(' %2d | %-29s | %9.2f  | %8.2f  | %6.2f  | %5.2f  | %10.2fx | %9.2fx\n', ...
+        k, S(k).name, fintErr(k), fintP99(k), keErr(k), keP99(k), spElem(k), spSol(k));
 end
-gateF = all(okAI) && max(fintErr) < 2 && max(keErrN(:,1)) < 2 && ...
-        max(fintP99) < 5 && max(keP99) < 5 && max(relU) < 0.5 && ...
-        sum(itAI) <= sum(itFEM) + 3*nS;
-fprintf('  Gate f (mean < 2 %%, P99 < 5 %%, dU < 0.5 %%, Iter <= FEM+3): %s\n', ...
-    gate_verdict(gateF));
 
 % ------------------------------------------------------------------------
-% Gate h: SPEEDUP -- das eigentliche Forschungsziel
-%   h1 (hart)     : Gesamt-Loesungszeit AI < FEM auf >= 4 von 5 Strukturen.
-%                   Der Hebel ist die Iterationszahl (Konsistenz).
-%   h2 (berichtet): Zeit je Assemblierung + Kostenmodell zur Extrapolation
-%                   auf teure Elemente (3D, viele GP, komplexe Materialien).
-%                   quad4 ist analytisch billig -- h2 darf knapp ausgehen.
+% Gates
 % ------------------------------------------------------------------------
-spSol = tSolFEM ./ max(tSolAI, eps);
-nWin  = sum(tSolAI < tSolFEM);
-fprintf('\n--- Gate h: Speedup (Forschungsziel) ---\n');
-fprintf(' Nr | Struktur                     | t_asm FEM | t_asm KI | Speedup | t_ges FEM | t_ges KI | Speedup\n');
-fprintf(' ---|------------------------------|-----------|----------|---------|-----------|----------|--------\n');
-for k = 1:nS
-    fprintf(' %2d | %-28s | %8.2fms | %7.2fms | %6.2fx | %8.2fs | %7.2fs | %6.2fx\n', ...
-        k, S(k).name, 1e3*tElemFEM(k), 1e3*tElemAI(k), spElem(k), ...
-        tSolFEM(k), tSolAI(k), spSol(k));
-end
-fprintf('  h1 (hart)     : Gesamtzeit KI schneller auf %d von %d Strukturen -> %s\n', ...
-    nWin, nS, gate_verdict(nWin >= max(1, nS - 1)));
-fprintf('  h2 (berichtet): Assemblierung Speedup Median %.2fx\n', median(spElem));
-print_cost_model();
-fprintf('  Hinweis: dU/dVM messen die Finte-Netzqualitaet; die Konsistenz\n');
-fprintf('           (Ke = dFinte/dUe) ist strukturell garantiert und wird in\n');
-fprintf('           FEMSolid_ex_quad4_09_ai_nl_consistency.m per FD geprueft.\n');
+gateK = all(okFEM) && all(okAI) && all(itAI <= itFEM + 3);
+gateG = gateK && max(relU) < 0.5 && max(fintP99) < 5 && max(keP99) < 5;
+gateZ = sum(tSolAI < tSolFEM) >= max(1, nS - 1);
+
+fprintf('\n--- Gates ---\n');
+fprintf('  K (alle konvergiert, KI <= FEM + 3 Iterationen je Struktur) : %s\n', gate_verdict(gateK));
+fprintf('  G (dU < 0.5 %%, Finte-P99 < 5 %%, Ke-P99 < 5 %%)               : %s\n', gate_verdict(gateG));
+fprintf('  Z (Gesamtloesung KI schneller auf >= %d von %d Strukturen)    : %s\n', ...
+    max(1, nS - 1), nS, gate_verdict(gateZ));
+fprintf('  Newton-Iterationen gesamt: FEM %d | KI %d\n', sum(itFEM), sum(itAI));
+fprintf('  Assemblierung Speedup Median %.2fx | Gesamtloesung Speedup Median %.2fx\n', ...
+    median(spElem), median(spSol));
 
 % ------------------------------------------------------------------------
-% (3) Ergebnis-Grafiken
+% Grafiken
 % ------------------------------------------------------------------------
-figure('Name', 'NL-Benchmark: Konvergenz, Genauigkeit, Zeit', 'NumberTitle', 'off', ...
-       'Position', [60 60 1500 760]);
+figure('Name', 'NL-Benchmark: Kennzahlen', 'NumberTitle', 'off', ...
+       'Position', [60 60 1500 420]);
 
-% (a) Newton-Iterationen FEM vs KI
-subplot(2,3,1);
+subplot(1,4,1);
 bar([itFEM, itAI]);
-xlabel('Struktur Nr.'); ylabel('Newton-Iter. (gesamt)');
-title('Newton-Iterationen (Konsistenz-Check)');
-legend({'FEM (analytisch)', 'KI-Element'}, 'Location', 'northwest');
-grid on;
+xlabel('Struktur Nr.'); ylabel('Newton-Iterationen (gesamt)');
+title('Konvergenz'); legend({'FEM', 'KI'}, 'Location', 'northwest'); grid on;
 
-% (b) Genauigkeit dU / dVM
-subplot(2,3,2);
+subplot(1,4,2);
 bar([relU, relVM]);
 xlabel('Struktur Nr.'); ylabel('rel. Fehler [%]');
-title('Genauigkeit der konvergierten Loesung');
-legend({'Verschiebung dU', 'von-Mises dVM'}, 'Location', 'northwest');
-grid on;
+title('Loesung'); legend({'dU', 'dVM'}, 'Location', 'northwest'); grid on;
 
-% (c) Finte-Fehler: alle Element-DOFs vs. nur freie DOFs (global)
-subplot(2,3,3);
-bar([fintErr, fintFree]);
+subplot(1,4,3);
+bar([fintErr, fintP99, keErr, keP99]);
 xlabel('Struktur Nr.'); ylabel('rel. Fehler [%]');
-title('Finte-Fehler: alle DOFs vs. nur freie DOFs');
-legend({'Element (alle DOFs)', 'global (freie DOFs)'}, 'Location', 'northwest');
-grid on;
+title('Element-Fehler (deformiert)');
+legend({'Finte mean', 'Finte P99', 'Ke mean', 'Ke P99'}, 'Location', 'northwest'); grid on;
 
-% (d) Ke-Fehler in verschiedenen Normen (deformiert)
-subplot(2,3,4);
-bar(keErrN);
-xlabel('Struktur Nr.'); ylabel('rel. Fehler [%]');
-title('Ke-Fehler in verschiedenen Normen');
-legend({'Frobenius', 'Spektral-2', '1-Norm', 'MaxAbs'}, 'Location', 'northwest');
-grid on;
-
-% (e) Assemblierungszeit FEM vs KI
-subplot(2,3,5);
+subplot(1,4,4);
 bar(1e3*[tElemFEM, tElemAI]);
 xlabel('Struktur Nr.'); ylabel('Zeit [ms]');
-title('Assemblierungszeit (deformiert, assemble.m)');
-legend({'FEM (klassisch)', 'KI-Element'}, 'Location', 'northwest');
-grid on;
+title('Assemblierung (deformiert)'); legend({'FEM', 'KI'}, 'Location', 'northwest'); grid on;
 
 sgtitle('Deep Learned Energie (quad4, nichtlinear): FEM vs. KI');
 
@@ -326,7 +196,7 @@ fprintf('\nFertig. Grafiken erzeugt.\n');
 % ========================================================================
 % Strukturdefinition: geometrisch nichtlineare Szenarien
 % ========================================================================
-function S = define_nl_structures(E, nu, d, scale)
+function S = define_nl_structures(E, nu, d, scale, distortion)
 %DEFINE_NL_STRUCTURES Liefert geometrisch nichtlineare quad4-Beispiele.
 %   Moderate Lasten mit Lastinkrementierung, damit Newton robust konvergiert.
 
@@ -338,18 +208,18 @@ k = 0;
 % --- 1) Schlanker Kragtraeger, Endquerlast (grosse Verdrehung) ------------
 k = k + 1;
 Lx = 10.0; Ly = 1.0; nx = scale*20; ny = scale*2;
-[coord, elem, ~, mat] = mesh_rect(Lx, Ly, nx, ny, matcard);
+[coord, elem, mat] = mesh_rect(Lx, Ly, nx, ny, matcard, distortion);
 left  = edge_nodes(coord, 'left',  Lx, Ly);
 right = edge_nodes(coord, 'right', Lx, Ly);
 bcond = fix_xy(left);
-vals  = line_load_nodes(right, coord(right,2), -0.4/Ly);    % Endquerlast (klein: in Huelle)
+vals  = line_load_nodes(right, coord(right,2), -0.4/Ly);    % Endquerlast (klein)
 S(k) = pack('Kragtraeger (Endquerlast)', coord, elem, mat, ...
             bcond, [right, 2*ones(numel(right),1), vals], [0 0]);
 
 % --- 2) Kragtraeger unter Eigengewicht (grosse Durchbiegung) --------------
 k = k + 1;
 Lx = 8.0; Ly = 1.0; nx = scale*18; ny = scale*2;
-[coord, elem, ~, mat] = mesh_rect(Lx, Ly, nx, ny, matcard);
+[coord, elem, mat] = mesh_rect(Lx, Ly, nx, ny, matcard, distortion);
 left  = edge_nodes(coord, 'left', Lx, Ly);
 bcond = fix_xy(left);
 S(k) = pack('Kragtraeger (Eigengewicht)', coord, elem, mat, ...
@@ -358,44 +228,78 @@ S(k) = pack('Kragtraeger (Eigengewicht)', coord, elem, mat, ...
 % --- 3) Tiefer Kragtraeger, Endquerlast (Schub + Nichtlin.) ---------------
 k = k + 1;
 Lx = 4.0; Ly = 2.0; nx = scale*12; ny = scale*6;
-[coord, elem, ~, mat] = mesh_rect(Lx, Ly, nx, ny, matcard);
+[coord, elem, mat] = mesh_rect(Lx, Ly, nx, ny, matcard, distortion);
 left  = edge_nodes(coord, 'left',  Lx, Ly);
 right = edge_nodes(coord, 'right', Lx, Ly);
 bcond = fix_xy(left);
-vals  = line_load_nodes(right, coord(right,2), -4/Ly);      % klein: in Huelle
+vals  = line_load_nodes(right, coord(right,2), -4/Ly);      % klein
 S(k) = pack('Tiefer Kragtraeger (Querlast)', coord, elem, mat, ...
             bcond, [right, 2*ones(numel(right),1), vals], [0 0]);
 
 % --- 4) Scheibe unter grosser In-Plane-Scherung ---------------------------
 k = k + 1;
 Lx = 3.0; Ly = 3.0; nx = scale*8; ny = scale*8;
-[coord, elem, ~, mat] = mesh_rect(Lx, Ly, nx, ny, matcard);
+[coord, elem, mat] = mesh_rect(Lx, Ly, nx, ny, matcard, distortion);
 bottom = edge_nodes(coord, 'bottom', Lx, Ly);
 bcond  = fix_xy(bottom);
 top    = edge_nodes(coord, 'top', Lx, Ly);
-vals   = line_load_nodes(top, coord(top,1), 6/Lx);          % Horizontalschub (klein: in Huelle)
+vals   = line_load_nodes(top, coord(top,1), 6/Lx);          % Horizontalschub (klein)
 S(k) = pack('Scheibe (Scherung)', coord, elem, mat, ...
             bcond, [top, ones(numel(top),1), vals], [0 0]);
 
 % --- 5) Kragtraeger, Axialzug (grosse Dehnung) ----------------------------
 k = k + 1;
 Lx = 6.0; Ly = 1.0; nx = scale*16; ny = scale*2;
-[coord, elem, ~, mat] = mesh_rect(Lx, Ly, nx, ny, matcard);
+[coord, elem, mat] = mesh_rect(Lx, Ly, nx, ny, matcard, distortion);
 left  = edge_nodes(coord, 'left',  Lx, Ly);
 right = edge_nodes(coord, 'right', Lx, Ly);
 bcond = fix_xy(left);
-vals  = line_load_nodes(right, coord(right,2), 60/Ly);      % Axialzug (Dehnung ~0.06, in Huelle)
+vals  = line_load_nodes(right, coord(right,2), 60/Ly);      % Axialzug (Dehnung ~0.06)
 S(k) = pack('Kragtraeger (Axialzug)', coord, elem, mat, ...
             bcond, [right, ones(numel(right),1), vals], [0 0]);
 
 end
 
 % ========================================================================
-% Hilfsfunktionen: Strukturaufbau (identisch zum linearen Benchmark)
+% Hilfsfunktionen: Strukturaufbau
 % ========================================================================
-function [coord, elem, bcond, mat] = mesh_rect(Lx, Ly, nx, ny, matcard)
-    [coord, elem, bcond, mat] = ...
+function [coord, elem, mat] = mesh_rect(Lx, Ly, nx, ny, matcard, distortion)
+%MESH_RECT Rechtecknetz; innere Knoten um +-distortion*Elementgroesse verschoben.
+%   Die Raender bleiben gerade (Lager und Lasten sitzen unveraendert).
+%   Fester Seed -> reproduzierbare Netze.
+    [coord, elem, ~, mat] = ...
         create_model_data_rectangle(Lx, Ly, nx, ny, [0 0 0 0], [0 0 0 0], matcard);
+    if distortion > 0
+        tol   = 1e-9 * max(Lx, Ly);
+        inner = coord(:,1) > tol & coord(:,1) < Lx - tol & ...
+                coord(:,2) > tol & coord(:,2) < Ly - tol;
+        rs = RandStream('mt19937ar', 'Seed', 7);
+        n  = nnz(inner);
+        coord(inner,1) = coord(inner,1) + distortion * (Lx/nx) * (2*rand(rs, n, 1) - 1);
+        coord(inner,2) = coord(inner,2) + distortion * (Ly/ny) * (2*rand(rs, n, 1) - 1);
+    end
+end
+
+function [ratioMax, angMin, angMax] = mesh_quality(S)
+%MESH_QUALITY Groesstes detJ-Verhaeltnis und Innenwinkelbereich aller Elemente.
+    gp = [-1 -1; 1 -1; 1 1; -1 1] / sqrt(3);
+    ratioMax = 1;  angMin = 180;  angMax = 0;
+    for k = 1:numel(S)
+        for e = 1:size(S(k).elem, 1)
+            ce = S(k).coord(S(k).elem(e,:), :);
+            dJ = zeros(4,1);
+            for g = 1:4
+                [~, ~, dJ(g)] = shape_quad4(ce, gp(g,:));
+            end
+            ratioMax = max(ratioMax, max(dJ) / min(dJ));
+            for i = 1:4
+                a = ce(mod(i-2,4)+1,:) - ce(i,:);
+                b = ce(mod(i,4)+1,:)   - ce(i,:);
+                ang = acosd(dot(a,b) / (norm(a)*norm(b)));
+                angMin = min(angMin, ang);  angMax = max(angMax, ang);
+            end
+        end
+    end
 end
 
 function bcond = fix_xy(nodes)
@@ -502,62 +406,39 @@ function t = time_assembly(model, U, R)
     t = median(ts);
 end
 
-function [fintErr, keErrN, fintP99, keP99] = elem_nl_error(model_fem, model_ai, U, nSample)
-%ELEM_NL_ERROR Mittlerer rel. Element-Fehler von Finte und Ke am Zustand U.
-%   Auf einer Zufallsstichprobe von bis zu nSample Elementen; beide Backends
-%   werden mit demselben (deformierten) Elementzustand Ue ausgewertet.
-%
-%   fintErr : skalarer rel. Finte-Fehler [%] (mit Floor, s.u.).
-%   keErrN  : 1x4-Vektor der mittleren rel. Ke-Fehler [%] in den Normen
-%             [Frobenius, Spektral-2, 1-Norm, MaxAbs]. Da Ke symmetrisch ist,
-%             gilt 1-Norm == inf-Norm; die Spektralnorm (groesster Singulaer-
-%             wert) beschraenkt den rel. Fehler in JEDER Verformungsmode.
-    NEL    = model_fem.info.NEL;
-    DOF    = model_fem.info.DOF;
+function [fintErr, keErr, fintP99, keP99] = elem_nl_error(model_fem, model_ai, U, nSample)
+%ELEM_NL_ERROR Rel. Element-Fehler von Finte und Ke (Frobenius) am Zustand U.
+%   Beide Backends werden auf einer Stichprobe von bis zu nSample Elementen
+%   mit demselben (deformierten) Elementzustand Ue ausgewertet.
+%   Finte mit Floor (2 % der RMS-Kraft): fast unbelastete Elemente (z.B. an
+%   der freien Spitze) wuerden den Mittelwert sonst beliebig aufblaehen.
+%   P99 zusaetzlich zum Mittel, weil Newton vom schlechtesten Element
+%   limitiert wird, nicht vom mittleren.
+    NEL = model_fem.info.NEL;  DOF = model_fem.info.DOF;
     rf = model_fem.element.routine;  ra = model_ai.element.routine;
     gp = model_fem.element.gp;  w = model_fem.element.w;  opts = model_fem.element.opts;
     MN = model_fem.material.name;  MC = model_fem.material.condition;
 
-    if NEL > nSample
-        idx = randperm(NEL, nSample);
-    else
-        idx = 1:NEL;
-    end
-    dF = zeros(numel(idx),1);   % absoluter Finte-Fehler je Element
-    nF = zeros(numel(idx),1);   % ||Finte|| je Element (analytisch)
-    eK = zeros(numel(idx),4);   % rel. Ke-Fehler je Element in 4 Normen
+    if NEL > nSample, idx = randperm(NEL, nSample); else, idx = 1:NEL; end
+    dF = zeros(numel(idx),1);  nF = zeros(numel(idx),1);  eK = zeros(numel(idx),1);
     for i = 1:numel(idx)
-        e     = idx(i);
-        dofs  = get_element_dofs(e, model_fem.elem, DOF);
-        ce    = model_fem.coord(model_fem.elem(e,:),:);
-        me    = model_fem.mat(e,:);
-        be    = model_fem.fvol(e,:)';
-        Ue    = U(dofs);
+        e    = idx(i);
+        dofs = get_element_dofs(e, model_fem.elem, DOF);
+        ce   = model_fem.coord(model_fem.elem(e,:),:);
+        me   = model_fem.mat(e,:);
+        be   = model_fem.fvol(e,:)';
+        Ue   = U(dofs);
         [Kf,~,~,Ff] = rf(ce, me, be, 0, Ue, [], gp, w, MN, MC, opts);
         [Ka,~,~,Fa] = ra(ce, me, be, 0, Ue, [], gp, w, MN, MC, opts);
         dF(i) = norm(Fa - Ff);
         nF(i) = norm(Ff);
-
-        Dk = Ka - Kf;
-        nrmK = [norm(Kf,'fro'), norm(Kf,2), norm(Kf,1), max(abs(Kf(:)))];
-        nrmD = [norm(Dk,'fro'), norm(Dk,2), norm(Dk,1), max(abs(Dk(:)))];
-        eK(i,:) = nrmD ./ max(nrmK, eps);
+        eK(i) = norm(Ka - Kf, 'fro') / max(norm(Kf, 'fro'), eps) * 100;
     end
-    % Relativer Finte-Fehler mit Floor (wie die Trainings-Metrik, 2026-07-15):
-    % fast unbelastete Elemente (||Finte|| -> 0, z.B. an der freien Spitze)
-    % wuerden den Mittelwert sonst beliebig aufblaehen, obwohl ihr absoluter
-    % Fehler winzig ist. Floor = 2 % der RMS-Kraft der Stichprobe.
-    floorF  = 0.02 * sqrt(mean(nF.^2));
-    relF    = dF ./ max(nF, floorF) * 100;
+    relF    = dF ./ max(nF, 0.02 * sqrt(mean(nF.^2))) * 100;
     fintErr = mean(relF);
-    keErrN  = mean(eK, 1) * 100;
-
-    % PERZENTILE (Plan): Newton wird vom SCHLECHTESTEN Element limitiert,
-    % nicht vom mittleren -- die Konvergenzrate haengt am dominanten
-    % Eigenwert der Iterationsmatrix. Ein Mittelwert von 1.5 % kann trotzdem
-    % problematisch sein, wenn einzelne Elemente 10-20 % Fehler haben.
+    keErr   = mean(eK);
     fintP99 = percentile_local(relF, 99);
-    keP99   = percentile_local(eK(:,1) * 100, 99);
+    keP99   = percentile_local(eK, 99);
 end
 
 function p = percentile_local(x, q)
@@ -570,73 +451,11 @@ function p = percentile_local(x, q)
     p   = x(lo) + (pos - lo) * (x(hi) - x(lo));
 end
 
-function fintFree = global_fint_error_free(model_fem, model_ai, U)
-%GLOBAL_FINT_ERROR_FREE Rel. Fehler des globalen inneren Kraftvektors [%],
-%   ausgewertet NUR auf den freien Freiheitsgraden.
-%
-%   Motivation: Das FE-Gleichgewicht Fint = Fext wird von Newton
-%   ausschliesslich auf den freien DOFs geloest (newton.m: Ra = R(dofsfree)).
-%   An den gebundenen DOFs (Auflager) steht dagegen die Auflagerreaktion
-%   (Fint = Fext + Freact, siehe compute_reaction_forces.m) -- oft eine sehr
-%   grosse Kraft, die die relative Norm dominieren und den fuer die Loesung
-%   relevanten Fehler verschleiern wuerde. Daher: nur die freien DOFs.
-%
-%   Beide Backends werden am DEMSELBEN (deformierten) Zustand U assembliert.
-    free = model_fem.dofs.free;
-    [~, ~, Fint_fem] = assemble(model_fem, U);
-    [~, ~, Fint_ai ] = assemble(model_ai,  U);
-    fintFree = norm(Fint_ai(free) - Fint_fem(free)) ...
-             / max(norm(Fint_fem(free)), eps) * 100;
-end
-
 % ========================================================================
 % Hilfsfunktionen: Gates
 % ========================================================================
 function s = gate_verdict(ok)
 if ok, s = 'GRUEN'; else, s = 'ROT'; end
-end
-
-function print_cost_model()
-%PRINT_COST_MODEL Arithmetik-Kostenmodell Netz-Kette vs. Gauss-Schleife.
-%   ACHTUNG BEI DER INTERPRETATION: Diese Zaehlung erfasst nur ARITHMETIK,
-%   nicht den Interpreter-Overhead. Sie erklaert deshalb NICHT die gemessenen
-%   Zeiten und darf nicht als deren Begruendung gelesen werden:
-%
-%     * Das Netz braucht arithmetisch MEHR Operationen als das analytische
-%       Element -- gemessen ist es in MATLAB trotzdem schneller.
-%     * Grund: das analytische Element verbringt seine Zeit in der
-%       interpretierten Doppelknotenschleife (4 GP x 16 Knotenpaare mit
-%       winzigen Matrizen), das Netz in wenigen dichten BLAS-Produkten.
-%       Der gemessene Vorteil kommt also aus der Ausfuehrungsform, nicht aus
-%       weniger Rechenarbeit. In einer vektorisierten oder kompilierten
-%       Referenzimplementierung koennte das analytische quad4 gewinnen.
-%
-%   Wofuer die Zahlen dann taugen: fuer die Extrapolation. Die FEM-Seite
-%   waechst mit Gausspunktzahl, Knotenzahl und Materialkomplexitaet, die
-%   Netz-Seite bleibt konstant -- dort liegt der eigentliche DLFE-Vorteil.
-    netFile = fullfile(fileparts(which('element_quad4_nl_ai')), 'quad4_nl_W_network.mat');
-    if ~exist(netFile, 'file'), return; end
-    N = load(netFile, 'hidden', 'depth', 'num_linear_layers');
-    h = double(N.hidden);  dep = double(N.depth);
-
-    macsFwd = 16*h + (dep-1)*h*h + h;        % ein Forward des Skalar-MLP
-    % Kosten je Elementaufruf: 1 Forward + Reverse (~2x) + Hessian mit 8
-    % Richtungen (~2x8 Forward-Aequivalente) + Null-Pass (Forward+Reverse ~3x)
-    macsElem = macsFwd * (1 + 2 + 16 + 3);
-    macsK0   = 4 * (3*8*8 + 8*8*3);          % 4 GP: B'CB (grob)
-    macsFEM  = 4 * (8*8*(3*3 + 4) + 3*8*3);  % 4 GP: Doppelknotenschleife (grob)
-
-    fprintf('  Kostenmodell -- NUR ARITHMETIK, ohne Interpreter-Overhead:\n');
-    fprintf('    Netz-Kette (h%d d%d): %8d   K0-Schleife: %6d   Summe KI: %8d\n', ...
-        h, dep, macsElem, macsK0, macsElem + macsK0);
-    fprintf('    analytisches quad4 : %8d   -> Verhaeltnis KI/FEM ~ %.1fx\n', ...
-        macsFEM, (macsElem + macsK0) / macsFEM);
-    fprintf('    ACHTUNG: Das Netz rechnet arithmetisch MEHR und ist gemessen\n');
-    fprintf('    trotzdem schneller. Der Vorteil kommt daher, dass die\n');
-    fprintf('    interpretierte Doppelknotenschleife durch wenige dichte\n');
-    fprintf('    Matrixprodukte ersetzt wird -- nicht aus weniger Rechenarbeit.\n');
-    fprintf('    Fuer die Extrapolation zaehlt: bei teuren Elementen (3D, viele\n');
-    fprintf('    GP, komplexe Materialgesetze) waechst NUR die FEM-Seite.\n');
 end
 
 % ========================================================================

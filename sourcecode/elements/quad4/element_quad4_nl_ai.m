@@ -3,7 +3,8 @@ function [Ke, Fbe, Fte, Finte, history] = element_quad4_nl_ai(coord_e, mat_e, b_
 % ------------------------------------------------------------------------
 % DESCRIPTION
 %   "Deep Learned Finite Elements" fuer das bilineare Viereckselement in der
-%   NICHTLINEAREN Analyse (Total Lagrange, St.-Venant-Kirchhoff).
+%   NICHTLINEAREN Analyse (Total Lagrange; St.-Venant-Kirchhoff oder
+%   Neo-Hooke, je ein eigenes Netz).
 %
 %   Das Element ersetzt die Gauss-Schleife des klassischen Elements durch ein
 %   SKALARES Energiemodell auf der kanonischen Geometrie:
@@ -41,22 +42,23 @@ function [Ke, Fbe, Fte, Finte, history] = element_quad4_nl_ai(coord_e, mat_e, b_
 %     W     = E * d * Lc^2 * What
 %     Finte = E * d * Lc   * Tc' * P * g_v
 %     Ke    = E * d        * Tc' * P * K_v * P * Tc
-%   nu = 0.3, planeStrain und das Materialgesetz (StVenant) sind FEST
-%   eintrainiert und werden beim Laden HART geprueft; E und Dicke d sind frei.
+%   nu = 0.3, planeStrain und das Materialgesetz sind FEST eintrainiert und
+%   werden HART geprueft; E und Dicke d sind frei. Je Material gibt es ein
+%   eigenes Netz (quad4_nl_ai_network_file): StVenant und NeoHookean1.
 %
 %   Volumenlast Fbe wird weiterhin analytisch berechnet (Fte = 0, wie im
 %   analytischen nl-Element).
 %
 % PREREQUISITE
-%   Run training/quad4/train_quad4_nl_W_network.py first to generate
-%   quad4_nl_W_network.mat.
+%   StVenant  : training/quad4/train_quad4_nl_W_network.py
+%   NeoHooke  : training/quad4/train_quad4_nl_W_network_neohooke.py
 %
 % INPUT / OUTPUT
 %   Identisch zu element_quad4_nl.m.
 %
 % ------------------------------------------------------------------------
 % LAST MODIFIED
-%   2026-08-31
+%   2026-09-17
 %
 % COPYRIGHT AND LICENSE
 %   Copyright (c) 2026 Daniel Materna
@@ -66,12 +68,10 @@ function [Ke, Fbe, Fte, Finte, history] = element_quad4_nl_ai(coord_e, mat_e, b_
 %   Licensed under the MIT License. See LICENSE file in the project root.
 % ------------------------------------------------------------------------
 
-persistent cfg_checked ood_count ood_warned E_max_train
+persistent cfg ood_warned
 
-if isempty(cfg_checked)
-    cfg_checked = false;
-    ood_count   = 0;
-    ood_warned  = false;
+if isempty(ood_warned)
+    ood_warned = false;
 end
 
 DIM    = size(coord_e, 2);
@@ -83,14 +83,22 @@ Fbe = zeros(NDOFEL, 1);
 Fte = zeros(NDOFEL, 1);
 
 % ------------------------------------------------------------------------
-% Konsistenzpruefung (nur EINMAL pro Session, nicht im Hot-Path).
-% HART (error): alles, was stumm falsche Physik ergaebe -- dieses Netz ist
-% materialgebunden (StVenant, nu, ebener Zustand sind eintrainiert).
+% Konsistenzpruefung: bei JEDEM Aufruf gegen die zuletzt gepruefte
+% Konfiguration (Material, nu, ebener Zustand). Frueher lief sie nur einmal
+% je MATLAB-Sitzung -- ein spaeteres Modell mit anderem Material rechnete
+% dann stumm mit dem falschen Netz. Der Vergleich kostet zwei String-
+% Vergleiche; die volle Pruefung (mit Netz-Metadaten) laeuft nur, wenn sich
+% die Konfiguration aendert.
+% HART (error): alles, was stumm falsche Physik ergaebe -- jedes Netz ist
+% materialgebunden (Material, nu, ebener Zustand sind eintrainiert).
 % ------------------------------------------------------------------------
-if ~cfg_checked
-    [~, Finte, Ke, dg, meta] = quad4_nl_ai_energy(coord_e, mat_e, Ue);
+if isempty(cfg) || ~strcmp(cfg.MATNAME, MATNAME) || cfg.nu ~= mat_e(2) ...
+        || ~strcmp(cfg.MATCOND, MATCOND)
+    [~, Finte, Ke, dg, meta] = quad4_nl_ai_energy(coord_e, mat_e, Ue, MATNAME);
 
-    if ~strcmpi(strtrim(char(meta.material)), MATNAME)
+    [~, matKey] = quad4_nl_ai_network_file(MATNAME);
+    [~, netKey] = quad4_nl_ai_network_file(meta.material);
+    if ~strcmp(matKey, netKey)
         error('element_quad4_nl_ai:Material', ...
             ['Das Netz wurde fuer Material "%s" trainiert, das Modell nutzt "%s". ' ...
              'Das Netz ist materialgebunden -- Ergebnisse waeren stumm falsch.'], ...
@@ -109,32 +117,41 @@ if ~cfg_checked
             strtrim(char(meta.condition)), MATCOND);
     end
 
-    E_max_train = meta.E_max;
-    cfg_checked = true;
+    cfg = struct('MATNAME', MATNAME, 'nu', mat_e(2), 'MATCOND', MATCOND, ...
+                 'hencky', strcmpi(meta.state_measure, 'hencky_J'), ...
+                 'E_max', meta.E_max, 'H_max', meta.H_max, ...
+                 'J_min', meta.J_min, 'J_max', meta.J_max);
 else
     % ------------------------------------------------------------------
     % Kern: Energie -> Finte, Ke (Kanonisierung, Ko-Rotation, Netz)
     % ------------------------------------------------------------------
-    [~, Finte, Ke, dg] = quad4_nl_ai_energy(coord_e, mat_e, Ue);
+    [~, Finte, Ke, dg] = quad4_nl_ai_energy(coord_e, mat_e, Ue, MATNAME);
 end
 
 % ------------------------------------------------------------------------
-% OOD-Proxy: ||E_green|| am Elementmittelpunkt (der Verschiebungsgradient
-% liegt fuer die Ko-Rotation ohnehin vor -> praktisch kostenlos). Die volle
-% 4-GP-Huellenpruefung bleibt bewusst DRAUSSEN aus dem Hot-Path; dafuer gibt
-% es FEMSolid_ex_quad4_08_ai_nl_check.m.
+% OOD-Proxy am Elementmittelpunkt (der Verschiebungsgradient liegt fuer die
+% Ko-Rotation ohnehin vor -> praktisch kostenlos). Das Mass kommt aus dem
+% Netz: ||E_green|| (StVenant) bzw. Hencky-Dehnung ||ln U|| und J = det F
+% (Neo-Hooke). Die volle 4-GP-Huellenpruefung bleibt bewusst DRAUSSEN aus
+% dem Hot-Path; dafuer gibt es FEMSolid_ex_quad4_08_ai_nl_check.m.
 % ------------------------------------------------------------------------
-if dg.maxE > E_max_train
-    ood_count = ood_count + 1;
-    if ~ood_warned
-        warning('element_quad4_nl_ai:OutOfHull', ...
-            ['Elementzustand ausserhalb der trainierten Huelle ' ...
-             '(||E_green|| = %.3f > %.3f). Das Netz extrapoliert -- Lasten ' ...
-             'reduzieren oder Huelle neu trainieren. Weitere Meldungen ' ...
-             'werden unterdrueckt (Diagnose: FEMSolid_ex_quad4_08_ai_nl_check).'], ...
-            dg.maxE, E_max_train);
-        ood_warned = true;
+if cfg.hencky
+    outside = dg.hencky > cfg.H_max || dg.J < cfg.J_min || dg.J > cfg.J_max;
+else
+    outside = dg.maxE > cfg.E_max;
+end
+if outside && ~ood_warned
+    if cfg.hencky
+        state = sprintf('||ln U|| = %.3f (max %.3f), J = %.3f (%.2f..%.2f)', ...
+            dg.hencky, cfg.H_max, dg.J, cfg.J_min, cfg.J_max);
+    else
+        state = sprintf('||E_green|| = %.3f > %.3f', dg.maxE, cfg.E_max);
     end
+    warning('element_quad4_nl_ai:OutOfHull', ...
+        ['Elementzustand ausserhalb der trainierten Huelle (%s). Das Netz ' ...
+         'extrapoliert -- Lasten reduzieren oder Huelle neu trainieren. ' ...
+         'Weitere Meldungen werden unterdrueckt.'], state);
+    ood_warned = true;
 end
 
 % ------------------------------------------------------------------------

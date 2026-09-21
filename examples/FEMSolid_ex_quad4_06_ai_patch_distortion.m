@@ -3,9 +3,8 @@
 % DESCRIPTION
 %   Untersucht die Generalisierungsfaehigkeit des Deep-Learned-quad4-Elements
 %   (ganze Steifigkeitsmatrix Ke aus dem Netz) gegenueber GEOMETRISCH
-%   VERZERRTEN Elementen -- ein Aspekt, den der regulaere Benchmark
-%   (FEMSolid_ex_quad4_05_ai_benchmark.m) mit seinen nahezu quadratischen
-%   Elementen nicht abdeckt.
+%   VERZERRTEN Elementen -- ein Aspekt, den regulaere Netze mit ihren
+%   nahezu quadratischen Elementen nicht abdecken.
 %
 %   Aufbau: ein Patch aus VIER quad4-Elementen mit einem gemeinsamen
 %   mittleren Knoten (9-Knoten-Patch). Der aeussere Rand (8 Knoten) bleibt
