@@ -13,3 +13,17 @@ training/quad4/nh_oracle.mat
 training/quad4/nh_oracle_states.mat
 # Datensatz-Cache des Trainings (regenerierbar, gross)
 training/quad4/dataset_cache_*.npz
+# brick8 / Gram-Phase-0 (regenerierbar)
+training/quad4/arch_sweep_nl_W_gram/
+training/brick8/arch_sweep_nl_W/
+training/brick8/*.log
+training/brick8/dataset_cache_brick8_*.npz
+training/brick8/newton_traj_states_brick8.mat
+training/brick8/brick8_oracle.mat
+training/brick8/brick8_oracle_states.mat
+training/common/__pycache__/
+
+# macOS / lokale Netzvarianten
+.DS_Store
+sourcecode/elements/quad4/64_quad4_nl_W_network.mat
+benchmarks/brick8_c/out/
