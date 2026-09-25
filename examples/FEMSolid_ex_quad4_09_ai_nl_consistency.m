@@ -29,7 +29,7 @@
 %
 % ------------------------------------------------------------------------
 % LAST MODIFIED
-%   2026-08-18
+%   2026-09-23  (Gate d auch fuer Metrik-/Gram-Netze, QUAD4_STATE_FORM=gram)
 %
 % COPYRIGHT AND LICENSE
 %   Copyright (c) 2026 Daniel Materna
@@ -67,7 +67,7 @@ if ~exist(netFile, 'file')
 end
 NET = load(netFile);
 
-fprintf('Material: %s | Netz: %s\n', MATNAME, strtrim(char(NET.model_form)));
+fprintf('Material: %s | Netz: %s | %s\n', MATNAME, strtrim(char(NET.model_form)), netFile);
 fprintf('      GELU, %d Gewichtslagen, Hidden %d, Tiefe %d\n', ...
     round(NET.num_linear_layers), round(NET.hidden), round(NET.depth));
 if isfield(NET, 'git_hash')
@@ -100,13 +100,27 @@ floorF = 0.01 * sqrt(mean(sum(NET.test_F.^2, 2)));
 M = zeros(8);  M(triu(true(8))) = 1:36;  M = M + triu(M,1).';
 recon = M(:);
 
+isGram = isfield(NET, 'state_form') && startsWith(strtrim(char(NET.state_form)), 'gram');
+if isGram
+    fprintf('  (Metrik-Netz %s: Kern dlfe_gram_energy direkt geprueft)\n', ...
+        strtrim(char(NET.state_form)));
+    NETG = dlfe_load_network(netFile, 4, 2);
+end
+
 for i = 1:nTest
     chat = NET.test_C(i,:).';
-    z    = NET.test_Z(i,:).';
 
     % Das kanonische Modell wird DIREKT geprueft (ohne Kette) -- genau die
     % Groessen, die Python als Oracle exportiert hat.
-    [Wm, Fm, Km] = quad4_nl_ai_model(chat, z, MATNAME);
+    if isGram
+        % Gram-Kern: W, dW/du, d2W/du2 auf der kanonischen Geometrie (Lc = 1)
+        xc = reshape(chat, 2, 4).';
+        uc = reshape(NET.test_U(i,:), 2, 4).';
+        [Wm, Fm, Km] = dlfe_gram_energy(NETG, chat, xc, uc);
+    else
+        z = NET.test_Z(i,:).';
+        [Wm, Fm, Km] = quad4_nl_ai_model(chat, z, MATNAME);
+    end
 
     eW(i) = abs(Wm - NET.test_W(i)) / max(abs(NET.test_W(i)), floorW);
     eF(i) = norm(Fm - NET.test_F(i,:).') / max(norm(NET.test_F(i,:)), floorF);

@@ -52,7 +52,7 @@ function [Wphys, Finte, Ke, dg, meta] = quad4_nl_ai_energy(coord_e, mat_e, Ue, M
 %   Licensed under the MIT License. See LICENSE file in the project root.
 % ------------------------------------------------------------------------
 
-persistent P Sigma
+persistent P Sigma formCache
 
 if isempty(P)
     tx = repmat([1; 0], 4, 1);
@@ -63,6 +63,28 @@ end
 
 if nargin < 4
     MATNAME = 'StVenant';
+end
+
+% ------------------------------------------------------------------------
+% 0. Zustandsform: Ko-Rotation (Standard) oder Gram-/Metrik-Kette
+%    (QUAD4_STATE_FORM=gram, siehe quad4_nl_ai_network_file). Die Wahl wird
+%    je Material persistent gecacht (Hot-Path: ein String-Vergleich).
+% ------------------------------------------------------------------------
+if isempty(formCache) || ~strcmp(formCache.MATNAME, MATNAME)
+    [f, ~, sf] = quad4_nl_ai_network_file(MATNAME);
+    formCache = struct('MATNAME', MATNAME, 'gram', strcmp(sf, 'gram'), 'file', f);
+end
+if formCache.gram
+    if nargout > 4
+        [Wphys, Finte, Ke, dg, meta] = quad4_nl_ai_energy_gram(coord_e, mat_e, Ue, formCache.file);
+    elseif nargout > 3
+        [Wphys, Finte, Ke, dg] = quad4_nl_ai_energy_gram(coord_e, mat_e, Ue, formCache.file);
+    elseif nargout > 2
+        [Wphys, Finte, Ke] = quad4_nl_ai_energy_gram(coord_e, mat_e, Ue, formCache.file);
+    else
+        [Wphys, Finte] = quad4_nl_ai_energy_gram(coord_e, mat_e, Ue, formCache.file);
+    end
+    return
 end
 
 Emod = mat_e(1);
